@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- Added bounded speech-history storage with a top-level History button.
+- Saved generated audio files alongside history sessions for offline replay when available.
+- Added a configurable history retention limit.
+- Added HUD track-build status to distinguish server fetching from fully built/offline tracks.
+- Prefetches subsequent pages while playback starts to reduce page-transition downtime and improve whole-session progress estimation.
+- Added dark / light mode with dark mode as the default.
+
+## 0.4.3
+
+- Generate Android launcher icon resources from root `icon.png` with border-connected white background removal.
+- Added adaptive-icon resources so launchers mask the icon without showing an opaque white square.
+
 ## 0.4.2
 
 - Added a setting to choose whether the playback bar tracks the entire text/document or only the current page.

@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -22,6 +23,8 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -31,6 +34,7 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -38,7 +42,10 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,11 +59,14 @@ public class MainActivity extends Activity {
     private TextView pageLabel;
     private TextView cacheLabel;
     private PasteAwareEditText textEdit;
+    private LinearLayout rootLayout;
     private SeekBar pageSeek;
     private Button prevButton;
     private Button nextButton;
     private Button playClipboardButton;
     private Button playTextButton;
+    private Button settingsButton;
+    private Button historyButton;
     private Button playPauseButton;
     private TextView playbackLabel;
     private TextView volumeLabel;
@@ -64,6 +74,7 @@ public class MainActivity extends Activity {
     private SeekBar volumeSeek;
 
     private final ArrayList<String> pages = new ArrayList<>();
+    private final HashSet<String> activeAudioGenerations = new HashSet<>();
     private final ArrayList<Integer> pageStartUnits = new ArrayList<>();
     private String fullText = "";
     private int currentPage = 0;
@@ -87,6 +98,8 @@ public class MainActivity extends Activity {
     private long lastProgressReportAt = 0L;
     private int pendingSeekPageIndex = -1;
     private int pendingSeekPageOffsetUnits = -1;
+    private String currentSessionId = "";
+    private long currentSessionCreatedAt = 0L;
 
     private final Runnable playbackProgressTicker = new Runnable() {
         @Override
@@ -154,6 +167,7 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
+        rootLayout = root;
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(10), dp(8), dp(10), dp(10));
 
@@ -177,12 +191,19 @@ public class MainActivity extends Activity {
         cacheLabel.setSingleLine(true);
         hudTextCol.addView(cacheLabel, matchWrap());
 
-        Button settingsButton = new Button(this);
+        historyButton = new Button(this);
+        historyButton.setText("History");
+        historyButton.setAllCaps(false);
+        historyButton.setTextSize(16);
+        historyButton.setMinHeight(dp(52));
+        hudRow.addView(historyButton, new LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        settingsButton = new Button(this);
         settingsButton.setText("Settings");
         settingsButton.setAllCaps(false);
         settingsButton.setTextSize(16);
         settingsButton.setMinHeight(dp(52));
-        hudRow.addView(settingsButton, new LinearLayout.LayoutParams(dp(116), ViewGroup.LayoutParams.WRAP_CONTENT));
+        hudRow.addView(settingsButton, new LinearLayout.LayoutParams(dp(108), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout navRow = new LinearLayout(this);
         navRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -291,6 +312,7 @@ public class MainActivity extends Activity {
         textParams.setMargins(dp(6), 0, 0, 0);
         buttonRow.addView(playTextButton, textParams);
 
+        historyButton.setOnClickListener(v -> showHistoryDialog());
         settingsButton.setOnClickListener(v -> showSettingsDialog());
         prevButton.setOnClickListener(v -> movePage(-1));
         nextButton.setOnClickListener(v -> movePage(1));
@@ -356,6 +378,7 @@ public class MainActivity extends Activity {
         });
 
         updatePageViews();
+        applyThemeToTree(root);
         setContentView(root);
     }
 
@@ -432,6 +455,7 @@ public class MainActivity extends Activity {
         pages.clear();
         pages.addAll(splitIntoPages(normalized, getMaxChars()));
         rebuildPlaybackProgressIndex();
+        ensureCurrentHistorySession();
         if (pages.isEmpty()) {
             currentPage = 0;
             updatePageViews();
@@ -590,11 +614,12 @@ public class MainActivity extends Activity {
         final int pageIndex = currentPage;
         final String text = pages.get(pageIndex);
         final File cached = audioFileFor(pageIndex, text);
-        if (cached.exists() && cached.length() > 0) {
-            setStatus("Using cached audio for page " + (pageIndex + 1) + ".");
-            playAudio(cached, pageIndex);
+        File playable = findPlayableAudioFile(pageIndex, text);
+        if (playable != null && playable.exists() && playable.length() > 0) {
+            setStatus((playable.equals(cached) ? "Using cached" : "Using saved history") + " audio for page " + (pageIndex + 1) + ".");
+            playAudio(playable, pageIndex);
             updatePageViews();
-            pregenerateNextPages(3, false);
+            ensurePrefetchAhead(pageIndex, false);
             return;
         }
         if (playbackGenerationActive && activePlaybackPageIndex == pageIndex) {
@@ -604,9 +629,10 @@ public class MainActivity extends Activity {
 
         setEstimatedPlaybackProgress(pageIndex, "Preparing page " + (pageIndex + 1) + "... waiting for Kokoro stream");
         setStatus("Generating page " + (pageIndex + 1) + " of " + pages.size() + "...");
+        final String sessionId = currentSessionId;
         executor.submit(() -> {
             try {
-                File out = requestSpeech(text, pageIndex);
+                File out = requestSpeech(text, pageIndex, sessionId);
                 mainHandler.post(() -> {
                     if (activePlaybackPageIndex == pageIndex) {
                         playbackGenerationActive = false;
@@ -615,7 +641,7 @@ public class MainActivity extends Activity {
                     if (currentPage == pageIndex) {
                         setStatus("Generated page " + (pageIndex + 1) + ". Playing.");
                         playAudio(out, pageIndex);
-                        pregenerateNextPages(3, false);
+                        ensurePrefetchAhead(pageIndex, false);
                     } else {
                         setStatus("Generated page " + (pageIndex + 1) + ".");
                     }
@@ -640,6 +666,7 @@ public class MainActivity extends Activity {
         }
         final int start = currentPage + 1;
         final int end = Math.min(pages.size(), start + count);
+        final String sessionId = currentSessionId;
         if (start >= end) {
             return;
         }
@@ -650,9 +677,8 @@ public class MainActivity extends Activity {
             int generated = 0;
             for (int i = start; i < end; i++) {
                 try {
-                    File f = audioFileFor(i, pages.get(i));
-                    if (!f.exists() || f.length() == 0) {
-                        requestSpeech(pages.get(i), i);
+                    if (!audioAvailableForPage(i, pages.get(i))) {
+                        requestSpeech(pages.get(i), i, sessionId);
                         generated++;
                     }
                 } catch (Exception ex) {
@@ -673,91 +699,108 @@ public class MainActivity extends Activity {
         });
     }
 
-    private File requestSpeech(String text, int pageIndex) throws Exception {
+    private File requestSpeech(String text, int pageIndex, String sessionId) throws Exception {
         File cached = audioFileFor(pageIndex, text);
-        File dir = cached.getParentFile();
-        if (dir != null && !dir.exists() && !dir.mkdirs()) {
-            throw new IllegalStateException("Could not create cache directory: " + dir.getAbsolutePath());
+        File existing = findPlayableAudioFile(sessionId, pageIndex, text);
+        if (existing != null && existing.exists() && existing.length() > 0) {
+            return existing;
         }
-
-        URL url = new URL(getServerBase() + "/v1/audio/speech");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(180000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        conn.setRequestProperty("Accept", acceptHeaderForFormat(getResponseFormat()));
-
-        JSONObject payload = new JSONObject();
-        payload.put("model", getModel());
-        payload.put("input", text);
-        payload.put("voice", getVoice());
-        payload.put("response_format", getResponseFormat());
-        payload.put("speed", getTtsSpeed());
-        payload.put("stream", prefBool("stream", true));
-        String lang = getLangCode();
-        if (!lang.isEmpty()) {
-            payload.put("lang_code", lang);
-        }
-        JSONObject normalization = new JSONObject();
-        normalization.put("normalize", prefBool("normalize", true));
-        normalization.put("unit_normalization", prefBool("unitNorm", false));
-        normalization.put("url_normalization", prefBool("urlNorm", true));
-        normalization.put("email_normalization", prefBool("emailNorm", true));
-        normalization.put("optional_pluralization_normalization", prefBool("pluralNorm", true));
-        normalization.put("phone_normalization", prefBool("phoneNorm", true));
-        payload.put("normalization_options", normalization);
-
-        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-        conn.setFixedLengthStreamingMode(body.length);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(body);
-        }
-
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            String error = readError(conn);
-            throw new IllegalStateException("HTTP " + code + " from Kokoro: " + error);
-        }
-
-        File tmp = new File(cached.getAbsolutePath() + ".tmp");
-        long expectedBytes = conn.getContentLengthLong();
-        try (InputStream is = new BufferedInputStream(conn.getInputStream());
-             FileOutputStream fos = new FileOutputStream(tmp)) {
-            byte[] buffer = new byte[8192];
-            int n;
-            long totalRead = 0L;
-            long lastReportedBytes = 0L;
-            reportDownloadProgress(pageIndex, totalRead, expectedBytes);
-            while ((n = is.read(buffer)) != -1) {
-                fos.write(buffer, 0, n);
-                totalRead += n;
-                long now = System.currentTimeMillis();
-                if (totalRead - lastReportedBytes >= 65536 || now - lastProgressReportAt >= 750) {
-                    lastReportedBytes = totalRead;
-                    lastProgressReportAt = now;
-                    reportDownloadProgress(pageIndex, totalRead, expectedBytes);
-                }
+        String generationKey = cached.getAbsolutePath();
+        if (!markAudioGenerationStarted(generationKey)) {
+            File waited = waitForGeneratedAudio(sessionId, pageIndex, text, 180000L);
+            if (waited != null) {
+                return waited;
             }
-            reportDownloadProgress(pageIndex, totalRead, totalRead);
-        } finally {
-            conn.disconnect();
+            throw new IllegalStateException("Timed out waiting for another generation of page " + (pageIndex + 1) + ".");
         }
+        try {
+            File dir = cached.getParentFile();
+            if (dir != null && !dir.exists() && !dir.mkdirs()) {
+                throw new IllegalStateException("Could not create cache directory: " + dir.getAbsolutePath());
+            }
 
-        if (tmp.length() == 0) {
-            //noinspection ResultOfMethodCallIgnored
-            tmp.delete();
-            throw new IllegalStateException("Kokoro returned an empty audio file.");
+            URL url = new URL(getServerBase() + "/v1/audio/speech");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(180000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            conn.setRequestProperty("Accept", acceptHeaderForFormat(getResponseFormat()));
+
+            JSONObject payload = new JSONObject();
+            payload.put("model", getModel());
+            payload.put("input", text);
+            payload.put("voice", getVoice());
+            payload.put("response_format", getResponseFormat());
+            payload.put("speed", getTtsSpeed());
+            payload.put("stream", prefBool("stream", true));
+            String lang = getLangCode();
+            if (!lang.isEmpty()) {
+                payload.put("lang_code", lang);
+            }
+            JSONObject normalization = new JSONObject();
+            normalization.put("normalize", prefBool("normalize", true));
+            normalization.put("unit_normalization", prefBool("unitNorm", false));
+            normalization.put("url_normalization", prefBool("urlNorm", true));
+            normalization.put("email_normalization", prefBool("emailNorm", true));
+            normalization.put("optional_pluralization_normalization", prefBool("pluralNorm", true));
+            normalization.put("phone_normalization", prefBool("phoneNorm", true));
+            payload.put("normalization_options", normalization);
+
+            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                String error = readError(conn);
+                throw new IllegalStateException("HTTP " + code + " from Kokoro: " + error);
+            }
+
+            File tmp = new File(cached.getAbsolutePath() + ".tmp");
+            long expectedBytes = conn.getContentLengthLong();
+            try (InputStream is = new BufferedInputStream(conn.getInputStream());
+                 FileOutputStream fos = new FileOutputStream(tmp)) {
+                byte[] buffer = new byte[8192];
+                int n;
+                long totalRead = 0L;
+                long lastReportedBytes = 0L;
+                reportDownloadProgress(pageIndex, totalRead, expectedBytes);
+                while ((n = is.read(buffer)) != -1) {
+                    fos.write(buffer, 0, n);
+                    totalRead += n;
+                    long now = System.currentTimeMillis();
+                    if (totalRead - lastReportedBytes >= 65536 || now - lastProgressReportAt >= 750) {
+                        lastReportedBytes = totalRead;
+                        lastProgressReportAt = now;
+                        reportDownloadProgress(pageIndex, totalRead, expectedBytes);
+                    }
+                }
+                reportDownloadProgress(pageIndex, totalRead, totalRead);
+            } finally {
+                conn.disconnect();
+            }
+
+            if (tmp.length() == 0) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                throw new IllegalStateException("Kokoro returned an empty audio file.");
+            }
+            if (cached.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                cached.delete();
+            }
+            if (!tmp.renameTo(cached)) {
+                throw new IllegalStateException("Could not move generated audio into cache.");
+            }
+            persistGeneratedAudio(sessionId, pageIndex, text, cached);
+            return cached;
+        } finally {
+            markAudioGenerationFinished(generationKey);
         }
-        if (cached.exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            cached.delete();
-        }
-        if (!tmp.renameTo(cached)) {
-            throw new IllegalStateException("Could not move generated audio into cache.");
-        }
-        return cached;
     }
 
     private String acceptHeaderForFormat(String format) {
@@ -975,7 +1018,7 @@ public class MainActivity extends Activity {
                 playbackSeek.setMax(getPlaybackBarMax());
                 playbackSeek.setProgress(playbackProgress);
             }
-            setPlaybackLabel(detail + " (" + getPlaybackScopeName() + " estimate; waiting for full Kokoro stream)");
+            setPlaybackLabel(detail + " (" + getPlaybackScopeName() + " estimate; " + getTrackBuildStatusLabel() + ")");
             mainHandler.postDelayed(playbackProgressTicker, 500);
             return;
         }
@@ -995,7 +1038,7 @@ public class MainActivity extends Activity {
                 int percent = Math.round((playbackProgress * 100f) / Math.max(1, getPlaybackBarMax()));
                 if (useWholeTextProgress()) {
                     String estimateSuffix = allPagesCached() ? "" : " est";
-                    setPlaybackLabel(String.format(Locale.US, "Document%s: %d%% • page %d/%d: %s / %s", estimateSuffix, percent, preparedPageIndex + 1, pages.size(), formatDuration(position), formatDuration(duration)));
+                    setPlaybackLabel(String.format(Locale.US, "Document%s: %d%% • page %d/%d: %s / %s • %s", estimateSuffix, percent, preparedPageIndex + 1, pages.size(), formatDuration(position), formatDuration(duration), getTrackBuildStatusLabel()));
                 } else {
                     setPlaybackLabel(String.format(Locale.US, "Page: %d%% • page %d/%d: %s / %s", percent, preparedPageIndex + 1, pages.size(), formatDuration(position), formatDuration(duration)));
                 }
@@ -1240,8 +1283,7 @@ public class MainActivity extends Activity {
             return false;
         }
         for (int i = 0; i < pages.size(); i++) {
-            File f = audioFileFor(i, pages.get(i));
-            if (!f.exists() || f.length() == 0) {
+            if (!audioAvailableForPage(i, pages.get(i))) {
                 return false;
             }
         }
@@ -1307,6 +1349,7 @@ public class MainActivity extends Activity {
                 updatePlayPauseButton();
                 updatePlaybackProgress();
                 setStatus("Playing page " + (pageIndex + 1) + " of " + pages.size() + " with " + getPlaybackScopeName() + " progress.");
+                ensurePrefetchAhead(pageIndex, false);
             });
             player.setOnCompletionListener(mp -> {
                 updatePlayPauseButton();
@@ -1378,7 +1421,7 @@ public class MainActivity extends Activity {
         }
         if (pages.isEmpty()) {
             pageLabel.setText("No pages yet");
-            cacheLabel.setText("Server: " + getServerBase() + "  Voice: " + getVoice());
+            cacheLabel.setText("Server: " + getServerBase() + "  Voice: " + getVoice() + " • " + getTrackBuildStatusLabel());
             pageSeek.setMax(0);
             pageSeek.setProgress(0);
             if (playbackSeek != null && !playbackSeekUserTouch) {
@@ -1392,10 +1435,9 @@ public class MainActivity extends Activity {
         }
         currentPage = Math.max(0, Math.min(currentPage, pages.size() - 1));
         String text = pages.get(currentPage);
-        File cached = audioFileFor(currentPage, text);
-        String cachedText = (cached.exists() && cached.length() > 0) ? "cached" : "not cached";
+        String cachedText = audioAvailableForPage(currentPage, text) ? "cached/saved" : "not cached";
         pageLabel.setText(String.format(Locale.US, "Page %d / %d", currentPage + 1, pages.size()));
-        cacheLabel.setText(String.format(Locale.US, "%s • %,d chars • %s • %s @ %.2fx", cachedText, text.length(), getVoice(), getResponseFormat(), getTtsSpeed()));
+        cacheLabel.setText(String.format(Locale.US, "%s • %,d chars • %s • %s @ %.2fx • %s", cachedText, text.length(), getVoice(), getResponseFormat(), getTtsSpeed(), getTrackBuildStatusLabel()));
         pageSeek.setMax(Math.max(0, pages.size() - 1));
         pageSeek.setProgress(currentPage);
         prevButton.setEnabled(currentPage > 0);
@@ -1408,11 +1450,14 @@ public class MainActivity extends Activity {
     }
 
     private File audioFileFor(int pageIndex, String text) {
+        return new File(getAudioCacheDir(), audioFileNameFor(pageIndex, text));
+    }
+
+    private String audioFileNameFor(int pageIndex, String text) {
         String format = getResponseFormat();
         String key = getTtsSettingsKey() + "\n" + pageIndex + "\n" + text;
         String digest = sha256(key).substring(0, 24);
-        String name = String.format(Locale.US, "page_%04d_%s.%s", pageIndex + 1, digest, safeExtension(format));
-        return new File(getAudioCacheDir(), name);
+        return String.format(Locale.US, "page_%04d_%s.%s", pageIndex + 1, digest, safeExtension(format));
     }
 
     private String safeExtension(String format) {
@@ -1432,7 +1477,7 @@ public class MainActivity extends Activity {
         File dir = getAudioCacheDir();
         int count = deleteChildren(dir);
         updatePageViews();
-        setStatus("Cleared " + count + " cached audio file(s).");
+        setStatus("Cleared " + count + " transient cached audio file(s). Saved history audio is kept.");
         return count;
     }
 
@@ -1479,6 +1524,7 @@ public class MainActivity extends Activity {
                 .putString("lastText", savedText == null ? "" : savedText)
                 .putInt("lastPage", currentPage)
                 .apply();
+        persistCurrentHistoryMetadata();
     }
 
     private void restoreLastSession(boolean autoPlay) {
@@ -1589,9 +1635,516 @@ public class MainActivity extends Activity {
         return prefs.getBoolean(key, defaultValue);
     }
 
+
+    private int getHistoryLimit() {
+        try {
+            int value = Integer.parseInt(prefString("historyLimit", "20").trim());
+            return Math.max(0, Math.min(200, value));
+        } catch (Exception ex) {
+            return 20;
+        }
+    }
+
+    private int getPrefetchPages() {
+        try {
+            int value = Integer.parseInt(prefString("prefetchPages", "5").trim());
+            return Math.max(0, Math.min(50, value));
+        } catch (Exception ex) {
+            return 5;
+        }
+    }
+
+    private boolean isDarkMode() {
+        return prefBool("darkMode", true);
+    }
+
+    private int colorBackground() {
+        return isDarkMode() ? Color.rgb(18, 18, 18) : Color.rgb(250, 250, 250);
+    }
+
+    private int colorSurface() {
+        return isDarkMode() ? Color.rgb(34, 34, 34) : Color.WHITE;
+    }
+
+    private int colorText() {
+        return isDarkMode() ? Color.rgb(238, 238, 238) : Color.rgb(25, 25, 25);
+    }
+
+    private int colorMutedText() {
+        return isDarkMode() ? Color.rgb(180, 180, 180) : Color.rgb(85, 85, 85);
+    }
+
+    private int colorButton() {
+        return isDarkMode() ? Color.rgb(58, 58, 58) : Color.rgb(232, 232, 232);
+    }
+
+    private void applyThemeToTree(View view) {
+        if (view == null) {
+            return;
+        }
+        int bg = colorBackground();
+        int surface = colorSurface();
+        int text = colorText();
+        int muted = colorMutedText();
+        int button = colorButton();
+        if (view instanceof CheckBox) {
+            ((CheckBox) view).setTextColor(text);
+        } else if (view instanceof Button) {
+            view.setBackgroundColor(button);
+            ((Button) view).setTextColor(text);
+        } else if (view instanceof EditText) {
+            view.setBackgroundColor(surface);
+            ((EditText) view).setTextColor(text);
+            ((EditText) view).setHintTextColor(muted);
+        } else if (view instanceof TextView) {
+            ((TextView) view).setTextColor(text);
+        } else if (view instanceof ScrollView || view instanceof LinearLayout || view instanceof TableLayout || view instanceof TableRow) {
+            view.setBackgroundColor(bg);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                applyThemeToTree(group.getChildAt(i));
+            }
+        }
+    }
+
+    private File getHistoryRootDir() {
+        return new File(getFilesDir(), "kokoro_history");
+    }
+
+    private File historySessionDir(String sessionId) {
+        return new File(getHistoryRootDir(), safeFileName(sessionId));
+    }
+
+    private File historySessionJsonFile(String sessionId) {
+        return new File(historySessionDir(sessionId), "session.json");
+    }
+
+    private File historyAudioFileFor(String sessionId, int pageIndex, String text) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return null;
+        }
+        return new File(historySessionDir(sessionId), audioFileNameFor(pageIndex, text));
+    }
+
+    private String safeFileName(String name) {
+        String safe = name == null ? "" : name.replaceAll("[^A-Za-z0-9_.-]", "_");
+        return safe.isEmpty() ? "session" : safe;
+    }
+
+    private void ensureCurrentHistorySession() {
+        if (fullText == null || fullText.trim().isEmpty()) {
+            currentSessionId = "";
+            currentSessionCreatedAt = 0L;
+            return;
+        }
+        String id = sha256(fullText + "\n" + getTtsSettingsKey()).substring(0, 18);
+        if (!id.equals(currentSessionId)) {
+            currentSessionId = id;
+            File json = historySessionJsonFile(id);
+            long now = System.currentTimeMillis();
+            if (json.exists()) {
+                JSONObject meta = readJsonFile(json);
+                currentSessionCreatedAt = meta == null ? now : meta.optLong("createdAt", now);
+            } else {
+                currentSessionCreatedAt = now;
+            }
+        }
+        persistCurrentHistoryMetadata();
+    }
+
+    private JSONObject currentSettingsSnapshot() throws Exception {
+        JSONObject settings = new JSONObject();
+        settings.put("server", getServerBase());
+        settings.put("model", getModel());
+        settings.put("voice", getVoice());
+        settings.put("speed", prefString("speed", "1.0"));
+        settings.put("playbackRate", prefString("playbackRate", "1.0"));
+        settings.put("responseFormat", getResponseFormat());
+        settings.put("stream", prefBool("stream", true));
+        settings.put("langCode", getLangCode());
+        settings.put("maxChars", prefString("maxChars", "3200"));
+        settings.put("normalize", prefBool("normalize", true));
+        settings.put("unitNorm", prefBool("unitNorm", false));
+        settings.put("urlNorm", prefBool("urlNorm", true));
+        settings.put("emailNorm", prefBool("emailNorm", true));
+        settings.put("pluralNorm", prefBool("pluralNorm", true));
+        settings.put("phoneNorm", prefBool("phoneNorm", true));
+        return settings;
+    }
+
+    private void applySettingsSnapshot(JSONObject settings) {
+        if (settings == null) {
+            return;
+        }
+        SharedPreferences.Editor editor = prefs.edit();
+        String[] stringKeys = new String[]{"server", "model", "voice", "speed", "playbackRate", "responseFormat", "langCode", "maxChars"};
+        for (String key : stringKeys) {
+            if (settings.has(key)) {
+                editor.putString(key, settings.optString(key, prefString(key, "")));
+            }
+        }
+        String[] boolKeys = new String[]{"stream", "normalize", "unitNorm", "urlNorm", "emailNorm", "pluralNorm", "phoneNorm"};
+        for (String key : boolKeys) {
+            if (settings.has(key)) {
+                editor.putBoolean(key, settings.optBoolean(key, prefBool(key, false)));
+            }
+        }
+        editor.apply();
+    }
+
+    private void persistCurrentHistoryMetadata() {
+        if (currentSessionId == null || currentSessionId.trim().isEmpty() || fullText == null || fullText.trim().isEmpty()) {
+            return;
+        }
+        try {
+            File dir = historySessionDir(currentSessionId);
+            if (!dir.exists() && !dir.mkdirs()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (currentSessionCreatedAt <= 0L) {
+                currentSessionCreatedAt = now;
+            }
+            JSONObject meta = new JSONObject();
+            meta.put("id", currentSessionId);
+            meta.put("createdAt", currentSessionCreatedAt);
+            meta.put("updatedAt", now);
+            meta.put("currentPage", currentPage);
+            meta.put("pageCount", pages.size());
+            meta.put("charCount", fullText.length());
+            meta.put("title", titleForText(fullText));
+            meta.put("text", fullText);
+            meta.put("settings", currentSettingsSnapshot());
+            meta.put("audioCount", countAvailableAudioFilesForSession(currentSessionId));
+            writeString(new File(dir, "session.json"), meta.toString(2));
+            pruneHistoryToLimit();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String titleForText(String text) {
+        if (text == null) {
+            return "Untitled";
+        }
+        String oneLine = text.replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        if (oneLine.isEmpty()) {
+            return "Untitled";
+        }
+        return oneLine.length() > 96 ? oneLine.substring(0, 96) + "..." : oneLine;
+    }
+
+    private void persistGeneratedAudio(String sessionId, int pageIndex, String text, File source) {
+        if (sessionId == null || sessionId.trim().isEmpty() || source == null || !source.exists() || source.length() == 0) {
+            return;
+        }
+        try {
+            File dst = historyAudioFileFor(sessionId, pageIndex, text);
+            if (dst == null) {
+                return;
+            }
+            File parent = dst.getParentFile();
+            if (parent != null && !parent.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+            if (!dst.equals(source)) {
+                copyFile(source, dst);
+            }
+            persistCurrentHistoryMetadata();
+            mainHandler.post(this::updatePageViews);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private File findPlayableAudioFile(int pageIndex, String text) {
+        return findPlayableAudioFile(currentSessionId, pageIndex, text);
+    }
+
+    private File findPlayableAudioFile(String sessionId, int pageIndex, String text) {
+        File cached = audioFileFor(pageIndex, text);
+        if (cached.exists() && cached.length() > 0) {
+            return cached;
+        }
+        File historical = historyAudioFileFor(sessionId, pageIndex, text);
+        if (historical != null && historical.exists() && historical.length() > 0) {
+            return historical;
+        }
+        return null;
+    }
+
+    private boolean audioAvailableForPage(int pageIndex, String text) {
+        File f = findPlayableAudioFile(pageIndex, text);
+        return f != null && f.exists() && f.length() > 0;
+    }
+
+    private int countAvailableAudioFilesForSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty() || pages.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (int i = 0; i < pages.size(); i++) {
+            if (findPlayableAudioFile(sessionId, i, pages.get(i)) != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private String getTrackBuildStatusLabel() {
+        if (pages.isEmpty()) {
+            return "Track: no text";
+        }
+        int have = 0;
+        for (int i = 0; i < pages.size(); i++) {
+            if (audioAvailableForPage(i, pages.get(i))) {
+                have++;
+            }
+        }
+        boolean fetching = getActiveGenerationCount() > 0 || playbackGenerationActive;
+        if (have >= pages.size()) {
+            return "Track: complete/offline";
+        }
+        return String.format(Locale.US, "Track: %s %d/%d", fetching ? "fetching" : "built", have, pages.size());
+    }
+
+    private int getActiveGenerationCount() {
+        synchronized (activeAudioGenerations) {
+            return activeAudioGenerations.size();
+        }
+    }
+
+    private boolean markAudioGenerationStarted(String key) {
+        synchronized (activeAudioGenerations) {
+            if (activeAudioGenerations.contains(key)) {
+                return false;
+            }
+            activeAudioGenerations.add(key);
+            mainHandler.post(this::updatePageViews);
+            return true;
+        }
+    }
+
+    private void markAudioGenerationFinished(String key) {
+        synchronized (activeAudioGenerations) {
+            activeAudioGenerations.remove(key);
+        }
+        mainHandler.post(this::updatePageViews);
+    }
+
+    private File waitForGeneratedAudio(String sessionId, int pageIndex, String text, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            File existing = findPlayableAudioFile(sessionId, pageIndex, text);
+            if (existing != null && existing.exists() && existing.length() > 0) {
+                return existing;
+            }
+            Thread.sleep(350L);
+        }
+        return null;
+    }
+
+    private void ensurePrefetchAhead(int fromPageIndex, boolean announce) {
+        if (pages.isEmpty()) {
+            return;
+        }
+        int count = getPrefetchPages();
+        if (count <= 0) {
+            return;
+        }
+        int start = Math.max(0, fromPageIndex) + 1;
+        if (start >= pages.size()) {
+            updatePageViews();
+            return;
+        }
+        pregenerateNextPages(count, announce);
+    }
+
+    private ArrayList<JSONObject> readHistorySessions() {
+        ArrayList<JSONObject> sessions = new ArrayList<>();
+        File root = getHistoryRootDir();
+        File[] dirs = root.listFiles();
+        if (dirs == null) {
+            return sessions;
+        }
+        for (File dir : dirs) {
+            if (!dir.isDirectory()) {
+                continue;
+            }
+            JSONObject meta = readJsonFile(new File(dir, "session.json"));
+            if (meta != null) {
+                sessions.add(meta);
+            }
+        }
+        sessions.sort((a, b) -> Long.compare(b.optLong("updatedAt", 0L), a.optLong("updatedAt", 0L)));
+        return sessions;
+    }
+
+    private void pruneHistoryToLimit() {
+        int limit = getHistoryLimit();
+        ArrayList<JSONObject> sessions = readHistorySessions();
+        for (int i = limit; i < sessions.size(); i++) {
+            String id = sessions.get(i).optString("id", "");
+            if (!id.isEmpty() && !id.equals(currentSessionId)) {
+                deleteChildren(historySessionDir(id));
+                //noinspection ResultOfMethodCallIgnored
+                historySessionDir(id).delete();
+            }
+        }
+    }
+
+    private void showHistoryDialog() {
+        ArrayList<JSONObject> sessions = readHistorySessions();
+        if (sessions.isEmpty()) {
+            setStatus("No generated speech history yet.");
+            toast("No history yet");
+            return;
+        }
+        ScrollView scroll = new ScrollView(this);
+        TableLayout table = new TableLayout(this);
+        table.setStretchAllColumns(false);
+        table.setShrinkAllColumns(true);
+        int pad = dp(8);
+        table.setPadding(pad, pad, pad, pad);
+        scroll.addView(table);
+
+        final AlertDialog[] historyDialogRef = new AlertDialog[1];
+
+        TableRow header = new TableRow(this);
+        addTableCell(header, "When", true, 0);
+        addTableCell(header, "Audio", true, 0);
+        addTableCell(header, "Voice", true, 0);
+        addTableCell(header, "Text", true, 1);
+        table.addView(header);
+
+        for (JSONObject meta : sessions) {
+            TableRow row = new TableRow(this);
+            row.setPadding(0, dp(4), 0, dp(4));
+            final String id = meta.optString("id", "");
+            int pageCount = meta.optInt("pageCount", 0);
+            String text = meta.optString("text", "");
+            JSONObject settings = meta.optJSONObject("settings");
+            String voice = settings == null ? "" : settings.optString("voice", "");
+            int audioCount = countAudioFilesInSession(id);
+            addTableCell(row, formatDateShort(meta.optLong("updatedAt", 0L)), false, 0);
+            addTableCell(row, audioCount + "/" + pageCount, false, 0);
+            addTableCell(row, voice, false, 0);
+            addTableCell(row, meta.optString("title", titleForText(text)), false, 1);
+            row.setOnClickListener(v -> {
+                if (historyDialogRef[0] != null) {
+                    historyDialogRef[0].dismiss();
+                }
+                loadHistorySession(id, true);
+            });
+            table.addView(row);
+        }
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Speech History")
+                .setView(scroll)
+                .setNegativeButton("Close", null)
+                .create();
+        historyDialogRef[0] = dialog;
+        dialog.setOnShowListener(d -> applyThemeToTree(scroll));
+        dialog.show();
+    }
+
+    private void addTableCell(TableRow row, String text, boolean header, int weight) {
+        TextView cell = new TextView(this);
+        cell.setText(text == null ? "" : text);
+        cell.setTextSize(header ? 14 : 13);
+        cell.setPadding(dp(6), dp(4), dp(6), dp(4));
+        cell.setMaxLines(header ? 1 : 2);
+        cell.setTextColor(colorText());
+        TableRow.LayoutParams params = new TableRow.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight <= 0 ? 0.0f : (float) weight);
+        if (weight <= 0) {
+            params = new TableRow.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+        row.addView(cell, params);
+    }
+
+    private void loadHistorySession(String sessionId, boolean autoPlay) {
+        JSONObject meta = readJsonFile(historySessionJsonFile(sessionId));
+        if (meta == null) {
+            setStatus("Could not load history session " + sessionId + ".");
+            return;
+        }
+        releasePlayer();
+        applySettingsSnapshot(meta.optJSONObject("settings"));
+        String text = meta.optString("text", "");
+        currentSessionId = meta.optString("id", sessionId);
+        currentSessionCreatedAt = meta.optLong("createdAt", System.currentTimeMillis());
+        int page = meta.optInt("currentPage", 0);
+        setFullTextAndPaginate(text, page, autoPlay, "Loaded history session.");
+    }
+
+    private int countAudioFilesInSession(String sessionId) {
+        File dir = historySessionDir(sessionId);
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return 0;
+        }
+        int count = 0;
+        for (File f : files) {
+            String name = f.getName().toLowerCase(Locale.US);
+            if (f.isFile() && (name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".aac") || name.endsWith(".flac") || name.endsWith(".opus") || name.endsWith(".pcm"))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private JSONObject readJsonFile(File file) {
+        try {
+            if (file == null || !file.exists()) {
+                return null;
+            }
+            try (InputStream is = new FileInputStream(file)) {
+                return new JSONObject(readAll(is));
+            }
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private void writeString(File file, String text) throws Exception {
+        File parent = file.getParentFile();
+        if (parent != null && !parent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            parent.mkdirs();
+        }
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            fos.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private void copyFile(File source, File dest) throws Exception {
+        File parent = dest.getParentFile();
+        if (parent != null && !parent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            parent.mkdirs();
+        }
+        try (InputStream is = new FileInputStream(source); FileOutputStream os = new FileOutputStream(dest)) {
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = is.read(buffer)) != -1) {
+                os.write(buffer, 0, n);
+            }
+        }
+    }
+
+    private String formatDateShort(long timeMs) {
+        if (timeMs <= 0L) {
+            return "unknown";
+        }
+        return new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(timeMs));
+    }
+
     private void showSettingsDialog() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
+        rootLayout = root;
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(14);
         root.setPadding(pad, pad, pad, pad);
@@ -1638,12 +2191,22 @@ public class MainActivity extends Activity {
         addLabel(langCol, "Language code, blank = auto");
         EditText langCodeEdit = addDialogEdit(langCol, getLangCode(), true, 1);
 
-        addLabel(root, "Chars per page/chunk");
-        EditText maxCharsEdit = addDialogEdit(root, prefString("maxChars", "3200"), true, 1);
+        LinearLayout row4 = row(root);
+        LinearLayout charsCol = col(row4, 1);
+        addLabel(charsCol, "Chars per page/chunk");
+        EditText maxCharsEdit = addDialogEdit(charsCol, prefString("maxChars", "3200"), true, 1);
         maxCharsEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        LinearLayout historyCol = col(row4, 1);
+        addLabel(historyCol, "History sessions to keep");
+        EditText historyLimitEdit = addDialogEdit(historyCol, prefString("historyLimit", "20"), true, 1);
+        historyLimitEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
 
+        CheckBox darkModeBox = addDialogCheck(root, "Dark mode", prefBool("darkMode", true));
         CheckBox streamBox = addDialogCheck(root, "Ask server to stream response", prefBool("stream", true));
         CheckBox autoNextBox = addDialogCheck(root, "Auto-generate/play next page", prefBool("autoNext", true));
+        addLabel(root, "Pages to prefetch ahead while playing");
+        EditText prefetchEdit = addDialogEdit(root, prefString("prefetchPages", "5"), true, 1);
+        prefetchEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
         CheckBox wholeTextProgressBox = addDialogCheck(root, "Playback bar tracks entire text", prefBool("wholeTextProgress", true));
         CheckBox autoRestoreBox = addDialogCheck(root, "Auto-load last text/session at startup", prefBool("autoRestore", true));
 
@@ -1657,6 +2220,7 @@ public class MainActivity extends Activity {
 
         LinearLayout sessionButtons = row(root);
         Button loadButton = addDialogButton(sessionButtons, "Load Last Session", 1);
+        Button historyDialogButton = addDialogButton(sessionButtons, "History", 1);
         Button pregenerateButton = addDialogButton(sessionButtons, "Pre-gen Next 3", 1);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
@@ -1676,6 +2240,9 @@ public class MainActivity extends Activity {
                         .putString("responseFormat", formatEdit.getText().toString().trim().toLowerCase(Locale.US))
                         .putString("langCode", langCodeEdit.getText().toString().trim())
                         .putString("maxChars", maxCharsEdit.getText().toString().trim())
+                        .putString("historyLimit", historyLimitEdit.getText().toString().trim())
+                        .putString("prefetchPages", prefetchEdit.getText().toString().trim())
+                        .putBoolean("darkMode", darkModeBox.isChecked())
                         .putBoolean("stream", streamBox.isChecked())
                         .putBoolean("autoNext", autoNextBox.isChecked())
                         .putBoolean("wholeTextProgress", wholeTextProgressBox.isChecked())
@@ -1695,6 +2262,9 @@ public class MainActivity extends Activity {
                     currentPage = Math.max(0, Math.min(keepPage, Math.max(0, pages.size() - 1)));
                 }
                 updatePageViews();
+                applyThemeToTree(rootLayout);
+                pruneHistoryToLimit();
+                ensurePrefetchAhead(currentPage, false);
                 if (playbackSeek != null && !playbackSeekUserTouch) {
                     playbackSeek.setMax(getPlaybackBarMax());
                     if (player == null || !playbackPrepared) {
@@ -1712,9 +2282,11 @@ public class MainActivity extends Activity {
         fetchVoicesButton.setOnClickListener(v -> fetchVoicesIntoField(serverEdit, voiceEdit));
         clearCacheButton.setOnClickListener(v -> clearAudioCache());
         loadButton.setOnClickListener(v -> restoreLastSession(false));
+        historyDialogButton.setOnClickListener(v -> showHistoryDialog());
         pregenerateButton.setOnClickListener(v -> pregenerateNextPages(3, true));
 
         dialog.show();
+        applyThemeToTree(scroll);
     }
 
     private void healthCheckServer(EditText serverEdit) {

@@ -9,12 +9,14 @@ This version is tuned for the workflow you described: **large controls, simple c
 The main screen intentionally stays simple:
 
 - small status HUD at the top
+- **History** button at the top for replaying previous generated sessions
 - **Settings** button at the top right
 - large **left / right page arrows** at the top of the screen
 - page counter and page seek bar
 - playback progress bar with play/pause and drag-to-seek after audio is ready
 - setting to make that bar track either the whole text/document or just the current page
 - stream/download estimate indicator while Kokoro is still returning audio
+- HUD track-build status showing whether the session is still fetching server audio or is fully built/offline
 - app-level volume slider
 - prominent text/page area
 - huge **Play Clipboard** button
@@ -65,9 +67,21 @@ The Settings dialog includes:
 - auto-load saved session
 - Kokoro text normalization toggles
 - clear audio cache
-- pre-generate next 3 pages
+- pre-generate next pages
+- max speech-history sessions to keep
+- prefetch pages-ahead count
+- dark / light mode, defaulting to dark
 
 For best Android playback compatibility, start with `mp3`.
+
+
+## Speech history and offline replay
+
+Generated sessions are saved in app-private storage as a bounded history list. The **History** button opens a table of previous text-to-speech sessions; selecting a row loads that text and starts playback from the saved session. When audio files are available, the app reuses the saved files so old sessions can be replayed offline without calling Kokoro again.
+
+The history limit is configurable in Settings. Set it to `0` if you do not want old sessions retained. The transient audio cache can still be cleared without deleting saved history audio.
+
+While playback starts, the app opportunistically prefetches subsequent pages. This helps the whole-text progress bar become more accurate, reduces gaps between pages, and improves resilience to Kokoro/server lag or brief network glitches. The HUD shows whether the track is still fetching or is complete/offline.
 
 ## Endpoint assumption
 
@@ -134,7 +148,7 @@ From this project directory:
 
 The script uses your installed `gradle` if available. If Gradle is not installed, it downloads Gradle 8.10.2 into `.gradle-local/` and uses that.
 
-The launcher icon is sourced from `icon.png` in the project root. Keep that file next to `settings.gradle`; the Gradle build copies it into generated Android `mipmap` resources before packaging the APK.
+The launcher icon is sourced from `icon.png` in the project root. Keep that file next to `settings.gradle`. The Gradle build generates density-specific launcher PNGs and Android adaptive-icon XML before packaging the APK. If the root PNG is an RGB image with a white background, the generator flood-fills only the border-connected near-white background to transparency, so Android launchers do not show the icon as a white square.
 
 The debug APK will be here:
 

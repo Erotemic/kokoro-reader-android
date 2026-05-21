@@ -10,8 +10,8 @@ android {
         applicationId 'com.crall.kokororeader'
         minSdk 26
         targetSdk 35
-        versionCode 6
-        versionName '0.4.2'
+        versionCode 8
+        versionName '0.5.0'
     }
 
     sourceSets {
@@ -29,6 +29,9 @@ android {
 
 // Keep icon.png at the project root as the single source of truth for the app icon.
 // The generated mipmap resources are produced before Android resource merging.
+// If icon.png has an opaque white border/background, the generator flood-fills only
+// border-connected near-white pixels to transparency so the Android launcher icon is
+// not rendered as a white square.
 tasks.register('syncRootLauncherIcon') {
     def rootIconFile = rootProject.file('icon.png')
     def generatedResDir = layout.buildDirectory.dir('generated/res/rootLauncherIcon')
@@ -41,22 +44,174 @@ tasks.register('syncRootLauncherIcon') {
             throw new GradleException("Expected launcher icon at ${rootIconFile}. Add icon.png to the project root before building.")
         }
 
-        def mipmapDir = new File(generatedResDir.get().asFile, 'mipmap-nodpi')
-        mipmapDir.mkdirs()
-
-        copy {
-            from rootIconFile
-            into mipmapDir
-            rename { 'ic_launcher.png' }
+        def resDir = generatedResDir.get().asFile
+        if (resDir.exists()) {
+            resDir.deleteDir()
         }
-        copy {
-            from rootIconFile
-            into mipmapDir
-            rename { 'ic_launcher_round.png' }
+        resDir.mkdirs()
+
+        def source = javax.imageio.ImageIO.read(rootIconFile)
+        if (source == null) {
+            throw new GradleException("Could not read ${rootIconFile} as an image.")
+        }
+
+        def withAlpha = makeBorderWhiteTransparent(source)
+
+        // Legacy launcher PNG sizes in pixels.
+        def legacySizes = [
+            'mipmap-mdpi': 48,
+            'mipmap-hdpi': 72,
+            'mipmap-xhdpi': 96,
+            'mipmap-xxhdpi': 144,
+            'mipmap-xxxhdpi': 192,
+        ]
+
+        legacySizes.each { dirName, size ->
+            def outDir = new File(resDir, dirName)
+            outDir.mkdirs()
+            writeScaledPng(withAlpha, new File(outDir, 'ic_launcher.png'), size, 0.92d)
+            writeScaledPng(withAlpha, new File(outDir, 'ic_launcher_round.png'), size, 0.92d)
+        }
+
+        // Adaptive icon foregrounds are rendered larger than legacy icons, but should
+        // keep artwork inside the adaptive safe zone so launchers can mask it.
+        def foregroundSizes = [
+            'mipmap-mdpi': 108,
+            'mipmap-hdpi': 162,
+            'mipmap-xhdpi': 216,
+            'mipmap-xxhdpi': 324,
+            'mipmap-xxxhdpi': 432,
+        ]
+
+        foregroundSizes.each { dirName, size ->
+            def outDir = new File(resDir, dirName)
+            outDir.mkdirs()
+            writeScaledPng(withAlpha, new File(outDir, 'ic_launcher_foreground.png'), size, 0.72d)
+        }
+
+        def valuesDir = new File(resDir, 'values')
+        valuesDir.mkdirs()
+        new File(valuesDir, 'ic_launcher_background.xml').text = '''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#00000000</color>
+</resources>
+'''
+
+        def anydpiDir = new File(resDir, 'mipmap-anydpi-v26')
+        anydpiDir.mkdirs()
+        def adaptiveXml = '''<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
+'''
+        new File(anydpiDir, 'ic_launcher.xml').text = adaptiveXml
+        new File(anydpiDir, 'ic_launcher_round.xml').text = adaptiveXml
+    }
+}
+
+boolean isSimilarBackground(int argb, int bgR, int bgG, int bgB) {
+    int alpha = (argb >>> 24) & 0xff
+    if (alpha == 0) {
+        return true
+    }
+    int r = (argb >>> 16) & 0xff
+    int g = (argb >>> 8) & 0xff
+    int b = argb & 0xff
+
+    int dr = r - bgR
+    int dg = g - bgG
+    int db = b - bgB
+    int dist2 = dr * dr + dg * dg + db * db
+
+    // The root icon currently has an RGB white background.  Keep this conservative:
+    // only near-white pixels similar to the edge/corner color are removable.
+    return r >= 220 && g >= 220 && b >= 220 && dist2 <= (55 * 55)
+}
+
+java.awt.image.BufferedImage makeBorderWhiteTransparent(java.awt.image.BufferedImage source) {
+    int width = source.getWidth()
+    int height = source.getHeight()
+    def image = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+    def graphics = image.createGraphics()
+    graphics.drawImage(source, 0, 0, null)
+    graphics.dispose()
+
+    int[][] corners = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]] as int[][]
+    int bgR = 0
+    int bgG = 0
+    int bgB = 0
+    corners.each { xy ->
+        int rgb = image.getRGB(xy[0], xy[1])
+        bgR += (rgb >>> 16) & 0xff
+        bgG += (rgb >>> 8) & 0xff
+        bgB += rgb & 0xff
+    }
+    bgR = Math.round(bgR / 4.0f)
+    bgG = Math.round(bgG / 4.0f)
+    bgB = Math.round(bgB / 4.0f)
+
+    boolean[] visited = new boolean[width * height]
+    def queue = new java.util.ArrayDeque<Integer>()
+    def enqueue = { int x, int y ->
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return
+        }
+        int idx = y * width + x
+        if (!visited[idx]) {
+            visited[idx] = true
+            queue.add(idx)
         }
     }
+
+    for (int x = 0; x < width; x++) {
+        enqueue(x, 0)
+        enqueue(x, height - 1)
+    }
+    for (int y = 0; y < height; y++) {
+        enqueue(0, y)
+        enqueue(width - 1, y)
+    }
+
+    while (!queue.isEmpty()) {
+        int idx = queue.removeFirst()
+        int x = idx % width
+        int y = idx.intdiv(width)
+        int argb = image.getRGB(x, y)
+        if (isSimilarBackground(argb, bgR, bgG, bgB)) {
+            image.setRGB(x, y, argb & 0x00ffffff)
+            enqueue(x - 1, y)
+            enqueue(x + 1, y)
+            enqueue(x, y - 1)
+            enqueue(x, y + 1)
+        }
+    }
+
+    return image
+}
+
+void writeScaledPng(java.awt.image.BufferedImage source, File outputFile, int canvasSize, double contentScale) {
+    def output = new java.awt.image.BufferedImage(canvasSize, canvasSize, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+    def graphics = output.createGraphics()
+    graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+    graphics.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY)
+    graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+
+    int maxContent = Math.max(1, Math.round(canvasSize * contentScale) as int)
+    double scale = Math.min(maxContent / (double) source.getWidth(), maxContent / (double) source.getHeight())
+    int drawWidth = Math.max(1, Math.round(source.getWidth() * scale) as int)
+    int drawHeight = Math.max(1, Math.round(source.getHeight() * scale) as int)
+    int x = Math.round((canvasSize - drawWidth) / 2.0f) as int
+    int y = Math.round((canvasSize - drawHeight) / 2.0f) as int
+
+    graphics.drawImage(source, x, y, drawWidth, drawHeight, null)
+    graphics.dispose()
+
+    outputFile.parentFile.mkdirs()
+    javax.imageio.ImageIO.write(output, 'png', outputFile)
 }
 
 tasks.matching { it.name == 'preBuild' }.configureEach {
     dependsOn('syncRootLauncherIcon')
 }
+
