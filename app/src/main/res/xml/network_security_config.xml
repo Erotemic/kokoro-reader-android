@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        This is intentionally permissive for a private VPN / LAN Kokoro server.
+        Do not use this unchanged for a public internet service.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
