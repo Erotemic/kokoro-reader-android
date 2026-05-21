@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- Added a setting to choose whether the playback bar tracks the entire text/document or only the current page.
+- Whole-text progress remains the default; current-page mode keeps the previous page-local behavior.
+
 ## 0.4.1
 
 - Use `icon.png` from the project root as the Android launcher icon.

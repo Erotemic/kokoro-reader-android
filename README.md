@@ -13,6 +13,7 @@ The main screen intentionally stays simple:
 - large **left / right page arrows** at the top of the screen
 - page counter and page seek bar
 - playback progress bar with play/pause and drag-to-seek after audio is ready
+- setting to make that bar track either the whole text/document or just the current page
 - stream/download estimate indicator while Kokoro is still returning audio
 - app-level volume slider
 - prominent text/page area
@@ -27,7 +28,7 @@ The main screen intentionally stays simple:
 2. Open Kokoro Reader.
 3. Tap **Play Clipboard**.
 
-The app reads the Android clipboard, normalizes line breaks, paginates/chunks the text, generates page 1 through Kokoro, and starts playback. While Kokoro is still returning the audio stream, the playback bar is labeled as an estimate; once the complete audio file is cached and Android prepares it, the bar switches to exact time/duration and can be dragged to seek.
+The app reads the Android clipboard, normalizes line breaks, paginates/chunks the text, generates page 1 through Kokoro, and starts playback. While Kokoro is still returning the audio stream, the playback bar is labeled as an estimate; once the complete audio file is cached and Android prepares it, the bar switches to exact time/duration and can be dragged to seek. By default the playback bar tracks the whole text/document across pages, but Settings can switch it back to current-page-only progress.
 
 ### Choose where to start
 
@@ -60,6 +61,7 @@ The Settings dialog includes:
 - language code override, blank means auto
 - page/chunk size
 - auto-generate/play next page
+- playback bar scope: entire text or current page only
 - auto-load saved session
 - Kokoro text normalization toggles
 - clear audio cache
