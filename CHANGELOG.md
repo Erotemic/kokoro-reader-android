@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Added a main-screen **Clear Text** button that clears the current editor/session while preserving speech history and saved audio.
+
 ## 0.5.0
 
 - Added bounded speech-history storage with a top-level History button.

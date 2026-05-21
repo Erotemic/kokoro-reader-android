@@ -21,6 +21,7 @@ The main screen intentionally stays simple:
 - prominent text/page area
 - huge **Play Clipboard** button
 - smaller **Play text** button
+- **Clear Text** button for clearing the current editor/session without deleting speech history
 
 ## Core workflow
 
@@ -39,7 +40,7 @@ The app reads the Android clipboard, normalizes line breaks, paginates/chunks th
 3. Use the top **◀ / ▶** arrows or the page slider to choose a page.
 4. Tap **Play text**.
 
-The arrows only select pages; they do not auto-play. This lets you flip through pages and choose where to start.
+The arrows only select pages; they do not auto-play. This lets you flip through pages and choose where to start. Use **Clear Text** when you want to empty the current editor/session without deleting saved speech history or offline audio.
 
 ### Existing text
 

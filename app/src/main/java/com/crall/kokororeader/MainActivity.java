@@ -65,6 +65,7 @@ public class MainActivity extends Activity {
     private Button nextButton;
     private Button playClipboardButton;
     private Button playTextButton;
+    private Button clearTextButton;
     private Button settingsButton;
     private Button historyButton;
     private Button playPauseButton;
@@ -309,8 +310,17 @@ public class MainActivity extends Activity {
         playTextButton.setTextSize(22);
         playTextButton.setMinHeight(dp(96));
         LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        textParams.setMargins(dp(6), 0, 0, 0);
+        textParams.setMargins(dp(6), 0, dp(6), 0);
         buttonRow.addView(playTextButton, textParams);
+
+        clearTextButton = new Button(this);
+        clearTextButton.setText("Clear Text");
+        clearTextButton.setAllCaps(false);
+        clearTextButton.setTextSize(18);
+        clearTextButton.setMinHeight(dp(96));
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        clearParams.setMargins(dp(6), 0, 0, 0);
+        buttonRow.addView(clearTextButton, clearParams);
 
         historyButton.setOnClickListener(v -> showHistoryDialog());
         settingsButton.setOnClickListener(v -> showSettingsDialog());
@@ -318,6 +328,7 @@ public class MainActivity extends Activity {
         nextButton.setOnClickListener(v -> movePage(1));
         playClipboardButton.setOnClickListener(v -> readClipboardSplitGeneratePlay());
         playTextButton.setOnClickListener(v -> playAllFromCurrentPage());
+        clearTextButton.setOnClickListener(v -> showClearTextDialog());
         playPauseButton.setOnClickListener(v -> togglePlayPause());
 
         playbackSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -424,6 +435,43 @@ public class MainActivity extends Activity {
         }
         clearPendingDocumentSeek();
         generateAndPlayCurrentPage();
+    }
+
+    private void showClearTextDialog() {
+        String editorText = textEdit == null ? "" : textEdit.getText().toString();
+        boolean hasText = (fullText != null && !fullText.trim().isEmpty()) || !editorText.trim().isEmpty() || !pages.isEmpty();
+        if (!hasText) {
+            clearCurrentTextSession("Text is already clear.");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Clear current text? History/audio are kept.")
+                .setPositiveButton("Clear", (dialog, which) -> clearCurrentTextSession("Cleared current text. Speech history is kept."))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void clearCurrentTextSession(String status) {
+        releasePlayer();
+        fullText = "";
+        pages.clear();
+        pageStartUnits.clear();
+        totalPlaybackUnits = 1;
+        currentPage = 0;
+        currentSessionId = "";
+        currentSessionCreatedAt = 0L;
+        clearPendingDocumentSeek();
+        if (textEdit != null) {
+            programmaticTextUpdate = true;
+            textEdit.setText("");
+            programmaticTextUpdate = false;
+        }
+        prefs.edit()
+                .putString("lastText", "")
+                .putInt("lastPage", 0)
+                .apply();
+        updatePageViews();
+        setStatus(status);
     }
 
     private boolean ensurePagesFromTextBox() {
