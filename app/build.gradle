@@ -10,12 +10,53 @@ android {
         applicationId 'com.crall.kokororeader'
         minSdk 26
         targetSdk 35
-        versionCode 3
-        versionName '0.3.0'
+        versionCode 5
+        versionName '0.4.1'
+    }
+
+    sourceSets {
+        main {
+            // Launcher icon resources are generated from the repo-root icon.png.
+            res.srcDirs += ["$buildDir/generated/res/rootLauncherIcon"]
+        }
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+// Keep icon.png at the project root as the single source of truth for the app icon.
+// The generated mipmap resources are produced before Android resource merging.
+tasks.register('syncRootLauncherIcon') {
+    def rootIconFile = rootProject.file('icon.png')
+    def generatedResDir = layout.buildDirectory.dir('generated/res/rootLauncherIcon')
+
+    inputs.file(rootIconFile)
+    outputs.dir(generatedResDir)
+
+    doLast {
+        if (!rootIconFile.isFile()) {
+            throw new GradleException("Expected launcher icon at ${rootIconFile}. Add icon.png to the project root before building.")
+        }
+
+        def mipmapDir = new File(generatedResDir.get().asFile, 'mipmap-nodpi')
+        mipmapDir.mkdirs()
+
+        copy {
+            from rootIconFile
+            into mipmapDir
+            rename { 'ic_launcher.png' }
+        }
+        copy {
+            from rootIconFile
+            into mipmapDir
+            rename { 'ic_launcher_round.png' }
+        }
+    }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn('syncRootLauncherIcon')
 }

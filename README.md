@@ -12,6 +12,9 @@ The main screen intentionally stays simple:
 - **Settings** button at the top right
 - large **left / right page arrows** at the top of the screen
 - page counter and page seek bar
+- playback progress bar with play/pause and drag-to-seek after audio is ready
+- stream/download estimate indicator while Kokoro is still returning audio
+- app-level volume slider
 - prominent text/page area
 - huge **Play Clipboard** button
 - smaller **Play text** button
@@ -24,7 +27,7 @@ The main screen intentionally stays simple:
 2. Open Kokoro Reader.
 3. Tap **Play Clipboard**.
 
-The app reads the Android clipboard, normalizes line breaks, paginates/chunks the text, generates page 1 through Kokoro, and starts playback.
+The app reads the Android clipboard, normalizes line breaks, paginates/chunks the text, generates page 1 through Kokoro, and starts playback. While Kokoro is still returning the audio stream, the playback bar is labeled as an estimate; once the complete audio file is cached and Android prepares it, the bar switches to exact time/duration and can be dragged to seek.
 
 ### Choose where to start
 
@@ -48,6 +51,7 @@ The Settings dialog includes:
 - server URL, e.g. `http://10.0.2.2:8880`
 - model, default `kokoro`
 - voice or voice mix, e.g. `af_bella` or `af_bella+af_sky`
+- **Health Check**, which tries `/health` and then `/v1/audio/voices`
 - **Fetch Voices** from `/v1/audio/voices`
 - TTS speed sent to Kokoro
 - local phone playback rate
@@ -127,6 +131,8 @@ From this project directory:
 ```
 
 The script uses your installed `gradle` if available. If Gradle is not installed, it downloads Gradle 8.10.2 into `.gradle-local/` and uses that.
+
+The launcher icon is sourced from `icon.png` in the project root. Keep that file next to `settings.gradle`; the Gradle build copies it into generated Android `mipmap` resources before packaging the APK.
 
 The debug APK will be here:
 

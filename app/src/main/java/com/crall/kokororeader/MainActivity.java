@@ -56,6 +56,11 @@ public class MainActivity extends Activity {
     private Button nextButton;
     private Button playClipboardButton;
     private Button playTextButton;
+    private Button playPauseButton;
+    private TextView playbackLabel;
+    private TextView volumeLabel;
+    private SeekBar playbackSeek;
+    private SeekBar volumeSeek;
 
     private final ArrayList<String> pages = new ArrayList<>();
     private String fullText = "";
@@ -66,6 +71,24 @@ public class MainActivity extends Activity {
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
+
+    private boolean playbackPrepared = false;
+    private boolean playbackSeekUserTouch = false;
+    private boolean playbackGenerationActive = false;
+    private boolean playbackProgressIsEstimate = false;
+    private int preparedPageIndex = -1;
+    private int activePlaybackPageIndex = -1;
+    private long estimatedPlaybackStartedAt = 0L;
+    private long estimatedBytesRead = 0L;
+    private long estimatedBytesExpected = -1L;
+    private long lastProgressReportAt = 0L;
+
+    private final Runnable playbackProgressTicker = new Runnable() {
+        @Override
+        public void run() {
+            updatePlaybackProgress();
+        }
+    };
 
     public static class PasteAwareEditText extends EditText {
         private Runnable pasteListener;
@@ -187,6 +210,43 @@ public class MainActivity extends Activity {
         pageSeek.setMax(0);
         root.addView(pageSeek, matchWrap());
 
+        playbackLabel = new TextView(this);
+        playbackLabel.setTextSize(13);
+        playbackLabel.setSingleLine(false);
+        playbackLabel.setMaxLines(2);
+        playbackLabel.setText("Playback: idle");
+        playbackLabel.setPadding(0, dp(6), 0, 0);
+        root.addView(playbackLabel, matchWrap());
+
+        playbackSeek = new SeekBar(this);
+        playbackSeek.setMax(1000);
+        playbackSeek.setProgress(0);
+        root.addView(playbackSeek, matchWrap());
+
+        LinearLayout mediaRow = new LinearLayout(this);
+        mediaRow.setOrientation(LinearLayout.HORIZONTAL);
+        mediaRow.setGravity(Gravity.CENTER_VERTICAL);
+        mediaRow.setPadding(0, dp(2), 0, dp(6));
+        root.addView(mediaRow, matchWrap());
+
+        playPauseButton = new Button(this);
+        playPauseButton.setText("Play");
+        playPauseButton.setAllCaps(false);
+        playPauseButton.setTextSize(18);
+        playPauseButton.setMinHeight(dp(56));
+        mediaRow.addView(playPauseButton, new LinearLayout.LayoutParams(dp(92), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        volumeLabel = new TextView(this);
+        volumeLabel.setTextSize(13);
+        volumeLabel.setGravity(Gravity.CENTER);
+        volumeLabel.setText("Vol " + getVolumePercent() + "%");
+        mediaRow.addView(volumeLabel, new LinearLayout.LayoutParams(dp(70), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        volumeSeek = new SeekBar(this);
+        volumeSeek.setMax(100);
+        volumeSeek.setProgress(getVolumePercent());
+        mediaRow.addView(volumeSeek, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
         textEdit = new PasteAwareEditText(this);
         textEdit.setTextSize(22);
         textEdit.setGravity(Gravity.TOP | Gravity.START);
@@ -231,6 +291,44 @@ public class MainActivity extends Activity {
         nextButton.setOnClickListener(v -> movePage(1));
         playClipboardButton.setOnClickListener(v -> readClipboardSplitGeneratePlay());
         playTextButton.setOnClickListener(v -> playTextFromCurrentPage());
+        playPauseButton.setOnClickListener(v -> togglePlayPause());
+
+        playbackSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    updatePlaybackLabelForScrub(progress);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                playbackSeekUserTouch = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                playbackSeekUserTouch = false;
+                seekPlaybackTo(seekBar.getProgress());
+            }
+        });
+
+        volumeSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    setPlaybackVolumePercent(progress);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
 
         pageSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -492,12 +590,20 @@ public class MainActivity extends Activity {
             pregenerateNextPages(3, false);
             return;
         }
+        if (playbackGenerationActive && activePlaybackPageIndex == pageIndex) {
+            setStatus("Already generating page " + (pageIndex + 1) + ".");
+            return;
+        }
 
+        setEstimatedPlaybackProgress(pageIndex, "Preparing page " + (pageIndex + 1) + "... waiting for Kokoro stream");
         setStatus("Generating page " + (pageIndex + 1) + " of " + pages.size() + "...");
         executor.submit(() -> {
             try {
                 File out = requestSpeech(text, pageIndex);
                 mainHandler.post(() -> {
+                    if (activePlaybackPageIndex == pageIndex) {
+                        playbackGenerationActive = false;
+                    }
                     updatePageViews();
                     if (currentPage == pageIndex) {
                         setStatus("Generated page " + (pageIndex + 1) + ". Playing.");
@@ -508,7 +614,15 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception ex) {
-                mainHandler.post(() -> setStatus("Generation failed: " + ex.getMessage()));
+                mainHandler.post(() -> {
+                    if (activePlaybackPageIndex == pageIndex) {
+                        playbackGenerationActive = false;
+                        playbackProgressIsEstimate = false;
+                        activePlaybackPageIndex = -1;
+                        resetPlaybackControls("Playback: generation failed");
+                    }
+                    setStatus("Generation failed: " + ex.getMessage());
+                });
             }
         });
     }
@@ -601,13 +715,25 @@ public class MainActivity extends Activity {
         }
 
         File tmp = new File(cached.getAbsolutePath() + ".tmp");
+        long expectedBytes = conn.getContentLengthLong();
         try (InputStream is = new BufferedInputStream(conn.getInputStream());
              FileOutputStream fos = new FileOutputStream(tmp)) {
             byte[] buffer = new byte[8192];
             int n;
+            long totalRead = 0L;
+            long lastReportedBytes = 0L;
+            reportDownloadProgress(pageIndex, totalRead, expectedBytes);
             while ((n = is.read(buffer)) != -1) {
                 fos.write(buffer, 0, n);
+                totalRead += n;
+                long now = System.currentTimeMillis();
+                if (totalRead - lastReportedBytes >= 65536 || now - lastProgressReportAt >= 750) {
+                    lastReportedBytes = totalRead;
+                    lastProgressReportAt = now;
+                    reportDownloadProgress(pageIndex, totalRead, expectedBytes);
+                }
             }
+            reportDownloadProgress(pageIndex, totalRead, totalRead);
         } finally {
             conn.disconnect();
         }
@@ -667,6 +793,266 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void setEstimatedPlaybackProgress(int pageIndex, String message) {
+        playbackGenerationActive = true;
+        playbackProgressIsEstimate = true;
+        playbackPrepared = false;
+        activePlaybackPageIndex = pageIndex;
+        preparedPageIndex = -1;
+        estimatedPlaybackStartedAt = System.currentTimeMillis();
+        estimatedBytesRead = 0L;
+        estimatedBytesExpected = -1L;
+        lastProgressReportAt = 0L;
+        if (playPauseButton != null) {
+            playPauseButton.setText("Play");
+        }
+        if (playbackSeek != null) {
+            playbackSeek.setMax(1000);
+            playbackSeek.setProgress(0);
+        }
+        setPlaybackLabel(message + " (estimate)");
+        startProgressTicker();
+    }
+
+    private void reportDownloadProgress(int pageIndex, long bytesRead, long expectedBytes) {
+        mainHandler.post(() -> {
+            if (!playbackGenerationActive || activePlaybackPageIndex != pageIndex || currentPage != pageIndex) {
+                return;
+            }
+            playbackProgressIsEstimate = true;
+            estimatedBytesRead = bytesRead;
+            estimatedBytesExpected = expectedBytes;
+            int progress;
+            String detail;
+            if (expectedBytes > 0) {
+                progress = (int) Math.max(0, Math.min(980, (bytesRead * 1000L) / expectedBytes));
+                detail = String.format(Locale.US, "%d%%", progress / 10);
+            } else {
+                long elapsed = Math.max(0L, System.currentTimeMillis() - estimatedPlaybackStartedAt);
+                progress = (int) Math.max(25, Math.min(950, elapsed / 300));
+                detail = formatBytes(bytesRead);
+            }
+            if (playbackSeek != null && !playbackSeekUserTouch) {
+                playbackSeek.setMax(1000);
+                playbackSeek.setProgress(progress);
+            }
+            setPlaybackLabel("Receiving Kokoro audio: " + detail + " (stream estimate; seek available after full audio arrives)");
+        });
+    }
+
+    private void togglePlayPause() {
+        if (player != null && playbackPrepared) {
+            try {
+                if (player.isPlaying()) {
+                    player.pause();
+                    updatePlayPauseButton();
+                    updatePlaybackProgress();
+                    setStatus("Paused page " + (preparedPageIndex + 1) + ".");
+                } else {
+                    applyPlaybackRate(player);
+                    applyPlaybackVolume();
+                    player.start();
+                    updatePlayPauseButton();
+                    setStatus("Playing page " + (preparedPageIndex + 1) + " of " + pages.size() + ".");
+                    startProgressTicker();
+                }
+            } catch (Exception ex) {
+                setStatus("Could not toggle playback: " + ex.getMessage());
+            }
+            return;
+        }
+        if (playbackGenerationActive) {
+            setStatus("Audio is still being generated. Progress is an estimate until the full stream arrives.");
+            return;
+        }
+        playTextFromCurrentPage();
+    }
+
+    private void seekPlaybackTo(int progress) {
+        if (player == null || !playbackPrepared) {
+            setStatus("Audio is not ready to seek yet.");
+            return;
+        }
+        try {
+            int duration = player.getDuration();
+            int target = progress;
+            if (duration > 0 && playbackSeek != null && playbackSeek.getMax() != duration) {
+                target = (int) ((progress / (float) Math.max(1, playbackSeek.getMax())) * duration);
+            }
+            target = Math.max(0, Math.min(target, Math.max(0, duration - 250)));
+            player.seekTo(target);
+            updatePlaybackProgress();
+            setStatus("Seeked to " + formatDuration(target) + ".");
+        } catch (Exception ex) {
+            setStatus("Seek failed: " + ex.getMessage());
+        }
+    }
+
+    private void updatePlaybackLabelForScrub(int progress) {
+        if (playbackLabel == null || playbackSeek == null) {
+            return;
+        }
+        if (player != null && playbackPrepared) {
+            try {
+                int duration = player.getDuration();
+                int max = Math.max(1, playbackSeek.getMax());
+                int pos = playbackSeek.getMax() == duration ? progress : (int) ((progress / (float) max) * duration);
+                setPlaybackLabel("Seek to " + formatDuration(pos) + " / " + formatDuration(duration));
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+        setPlaybackLabel("Playback position " + (progress / 10) + "% (estimate)");
+    }
+
+    private void startProgressTicker() {
+        mainHandler.removeCallbacks(playbackProgressTicker);
+        mainHandler.post(playbackProgressTicker);
+    }
+
+    private void stopProgressTicker() {
+        mainHandler.removeCallbacks(playbackProgressTicker);
+    }
+
+    private void updatePlaybackProgress() {
+        if (playbackGenerationActive && !playbackPrepared) {
+            long elapsed = Math.max(0L, System.currentTimeMillis() - estimatedPlaybackStartedAt);
+            int progress;
+            String detail;
+            if (estimatedBytesExpected > 0) {
+                progress = (int) Math.max(0, Math.min(980, (estimatedBytesRead * 1000L) / estimatedBytesExpected));
+                detail = String.format(Locale.US, "Receiving Kokoro audio: %d%%", progress / 10);
+            } else if (estimatedBytesRead > 0) {
+                progress = (int) Math.max(25, Math.min(950, elapsed / 300));
+                detail = "Receiving Kokoro audio: " + formatBytes(estimatedBytesRead);
+            } else {
+                progress = (int) Math.max(0, Math.min(950, elapsed / 300));
+                detail = "Preparing audio... " + (progress / 10) + "%";
+            }
+            if (playbackSeek != null && !playbackSeekUserTouch && playbackSeek.getProgress() < progress) {
+                playbackSeek.setMax(1000);
+                playbackSeek.setProgress(progress);
+            }
+            setPlaybackLabel(detail + " (estimate; waiting for full Kokoro stream)");
+            mainHandler.postDelayed(playbackProgressTicker, 500);
+            return;
+        }
+        if (player == null || !playbackPrepared) {
+            updatePlayPauseButton();
+            return;
+        }
+        try {
+            int duration = player.getDuration();
+            int position = player.getCurrentPosition();
+            if (duration > 0) {
+                if (playbackSeek != null && !playbackSeekUserTouch) {
+                    playbackSeek.setMax(duration);
+                    playbackSeek.setProgress(Math.max(0, Math.min(position, duration)));
+                }
+                setPlaybackLabel(String.format(Locale.US, "Playback: %s / %s", formatDuration(position), formatDuration(duration)));
+            } else {
+                playbackProgressIsEstimate = true;
+                if (playbackSeek != null && !playbackSeekUserTouch) {
+                    playbackSeek.setMax(1000);
+                    playbackSeek.setProgress(Math.min(950, playbackSeek.getProgress() + 5));
+                }
+                setPlaybackLabel("Playback position is estimated; duration unavailable yet.");
+            }
+            updatePlayPauseButton();
+            mainHandler.postDelayed(playbackProgressTicker, player.isPlaying() ? 500 : 1000);
+        } catch (Exception ex) {
+            setPlaybackLabel("Playback: " + ex.getMessage());
+        }
+    }
+
+    private void resetPlaybackControls(String label) {
+        stopProgressTicker();
+        playbackPrepared = false;
+        playbackProgressIsEstimate = false;
+        estimatedBytesRead = 0L;
+        estimatedBytesExpected = -1L;
+        preparedPageIndex = -1;
+        activePlaybackPageIndex = -1;
+        if (playbackSeek != null && !playbackSeekUserTouch) {
+            playbackSeek.setMax(1000);
+            playbackSeek.setProgress(0);
+        }
+        setPlaybackLabel(label);
+        updatePlayPauseButton();
+    }
+
+    private void setPlaybackLabel(String label) {
+        if (playbackLabel != null) {
+            playbackLabel.setText(label == null ? "Playback: idle" : label);
+        }
+    }
+
+    private void updatePlayPauseButton() {
+        if (playPauseButton == null) {
+            return;
+        }
+        if (player != null && playbackPrepared) {
+            try {
+                playPauseButton.setText(player.isPlaying() ? "Pause" : "Play");
+                playPauseButton.setEnabled(true);
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+        playPauseButton.setText("Play");
+        playPauseButton.setEnabled(!playbackGenerationActive && !pages.isEmpty());
+    }
+
+    private void setPlaybackVolumePercent(int percent) {
+        int clamped = Math.max(0, Math.min(100, percent));
+        prefs.edit().putString("volumePercent", String.valueOf(clamped)).apply();
+        if (volumeLabel != null) {
+            volumeLabel.setText("Vol " + clamped + "%");
+        }
+        applyPlaybackVolume();
+    }
+
+    private int getVolumePercent() {
+        try {
+            int value = Integer.parseInt(prefString("volumePercent", "100").trim());
+            return Math.max(0, Math.min(100, value));
+        } catch (Exception ex) {
+            return 100;
+        }
+    }
+
+    private float getPlaybackVolume() {
+        return Math.max(0f, Math.min(1f, getVolumePercent() / 100f));
+    }
+
+    private void applyPlaybackVolume() {
+        if (player != null) {
+            try {
+                float volume = getPlaybackVolume();
+                player.setVolume(volume, volume);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private String formatDuration(int ms) {
+        int totalSeconds = Math.max(0, ms / 1000);
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return String.format(Locale.US, "%d:%02d", minutes, seconds);
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        double kib = bytes / 1024.0;
+        if (kib < 1024) {
+            return String.format(Locale.US, "%.1f KiB", kib);
+        }
+        return String.format(Locale.US, "%.1f MiB", kib / 1024.0);
+    }
+
     private void playAudio(File file, int pageIndex) {
         try {
             releasePlayer();
@@ -680,11 +1066,30 @@ public class MainActivity extends Activity {
             }
             player.setDataSource(file.getAbsolutePath());
             player.setOnPreparedListener(mp -> {
+                playbackPrepared = true;
+                playbackGenerationActive = false;
+                playbackProgressIsEstimate = false;
+                preparedPageIndex = pageIndex;
+                activePlaybackPageIndex = pageIndex;
                 applyPlaybackRate(mp);
+                applyPlaybackVolume();
                 mp.start();
+                updatePlayPauseButton();
+                updatePlaybackProgress();
                 setStatus("Playing page " + (pageIndex + 1) + " of " + pages.size() + ".");
             });
             player.setOnCompletionListener(mp -> {
+                updatePlayPauseButton();
+                try {
+                    int duration = mp.getDuration();
+                    if (playbackSeek != null && duration > 0 && !playbackSeekUserTouch) {
+                        playbackSeek.setMax(duration);
+                        playbackSeek.setProgress(duration);
+                    }
+                    setPlaybackLabel("Finished: " + formatDuration(duration));
+                } catch (Exception ignored) {
+                    setPlaybackLabel("Finished page " + (pageIndex + 1) + ".");
+                }
                 if (prefBool("autoNext", true) && currentPage + 1 < pages.size()) {
                     currentPage++;
                     saveSession();
@@ -695,6 +1100,7 @@ public class MainActivity extends Activity {
                 }
             });
             player.setOnErrorListener((mp, what, extra) -> {
+                resetPlaybackControls("Playback error");
                 setStatus("Playback error: what=" + what + " extra=" + extra + ". Try mp3 response format if another format fails.");
                 return true;
             });
@@ -714,6 +1120,7 @@ public class MainActivity extends Activity {
     }
 
     private void releasePlayer() {
+        stopProgressTicker();
         if (player != null) {
             try {
                 player.stop();
@@ -725,6 +1132,14 @@ public class MainActivity extends Activity {
             }
             player = null;
         }
+        playbackPrepared = false;
+        playbackGenerationActive = false;
+        playbackProgressIsEstimate = false;
+        estimatedBytesRead = 0L;
+        estimatedBytesExpected = -1L;
+        preparedPageIndex = -1;
+        activePlaybackPageIndex = -1;
+        resetPlaybackControls("Playback: idle");
     }
 
     private void updatePageViews() {
@@ -738,6 +1153,7 @@ public class MainActivity extends Activity {
             pageSeek.setProgress(0);
             prevButton.setEnabled(false);
             nextButton.setEnabled(false);
+            updatePlayPauseButton();
             return;
         }
         currentPage = Math.max(0, Math.min(currentPage, pages.size() - 1));
@@ -754,6 +1170,7 @@ public class MainActivity extends Activity {
         textEdit.setText(text);
         textEdit.setSelection(0);
         programmaticTextUpdate = false;
+        updatePlayPauseButton();
     }
 
     private File audioFileFor(int pageIndex, String text) {
@@ -965,6 +1382,7 @@ public class MainActivity extends Activity {
         EditText voiceEdit = addDialogEdit(voiceCol, getVoice(), true, 1);
 
         LinearLayout voiceButtons = row(root);
+        Button healthButton = addDialogButton(voiceButtons, "Health Check", 1);
         Button fetchVoicesButton = addDialogButton(voiceButtons, "Fetch Voices", 1);
         Button clearCacheButton = addDialogButton(voiceButtons, "Clear Audio Cache", 1);
 
@@ -1046,12 +1464,62 @@ public class MainActivity extends Activity {
             });
         });
 
+        healthButton.setOnClickListener(v -> healthCheckServer(serverEdit));
         fetchVoicesButton.setOnClickListener(v -> fetchVoicesIntoField(serverEdit, voiceEdit));
         clearCacheButton.setOnClickListener(v -> clearAudioCache());
         loadButton.setOnClickListener(v -> restoreLastSession(false));
         pregenerateButton.setOnClickListener(v -> pregenerateNextPages(3, true));
 
         dialog.show();
+    }
+
+    private void healthCheckServer(EditText serverEdit) {
+        String base = normalizeServer(serverEdit.getText().toString());
+        setStatus("Checking Kokoro health at " + base + "...");
+        executor.submit(() -> {
+            String[] paths = new String[]{"/health", "/v1/audio/voices"};
+            String lastError = "no response";
+            for (String path : paths) {
+                HttpURLConnection conn = null;
+                try {
+                    URL url = new URL(base + path);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(5000);
+                    conn.setReadTimeout(10000);
+                    conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+                    int code = conn.getResponseCode();
+                    String body;
+                    try (InputStream is = code >= 200 && code < 400 ? conn.getInputStream() : conn.getErrorStream()) {
+                        body = is == null ? "" : readAllLimited(is, 512).trim();
+                    }
+                    if (code >= 200 && code < 300) {
+                        String snippet = body.isEmpty() ? "OK" : body.replace('\n', ' ');
+                        if (snippet.length() > 160) {
+                            snippet = snippet.substring(0, 160) + "...";
+                        }
+                        final String message = "Health OK: HTTP " + code + " " + path + " - " + snippet;
+                        mainHandler.post(() -> {
+                            setStatus(message);
+                            toast("Kokoro health check OK");
+                        });
+                        return;
+                    }
+                    lastError = "HTTP " + code + " " + path + ": " + body;
+                } catch (Exception ex) {
+                    lastError = path + ": " + ex.getMessage();
+                } finally {
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+            final String message = "Health check failed: " + lastError;
+            mainHandler.post(() -> {
+                setStatus(message);
+                toast("Kokoro health check failed");
+            });
+        });
     }
 
     private void fetchVoicesIntoField(EditText serverEdit, EditText voiceEdit) {
@@ -1092,6 +1560,17 @@ public class MainActivity extends Activity {
         int n;
         while ((n = is.read(buffer)) != -1) {
             baos.write(buffer, 0, n);
+        }
+        return baos.toString("UTF-8");
+    }
+
+    private String readAllLimited(InputStream is, int limit) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int n;
+        while ((n = is.read(buffer)) != -1 && baos.size() < limit) {
+            int remaining = limit - baos.size();
+            baos.write(buffer, 0, Math.min(n, remaining));
         }
         return baos.toString("UTF-8");
     }
