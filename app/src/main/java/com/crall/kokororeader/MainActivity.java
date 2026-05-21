@@ -217,7 +217,9 @@ public class MainActivity extends Activity {
         prevButton.setTextSize(34);
         prevButton.setAllCaps(false);
         prevButton.setMinHeight(dp(78));
-        navRow.addView(prevButton, new LinearLayout.LayoutParams(dp(92), ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams prevParams = new LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT);
+        prevParams.setMargins(0, 0, dp(8), 0);
+        navRow.addView(prevButton, prevParams);
 
         pageLabel = new TextView(this);
         pageLabel.setTextSize(22);
@@ -231,7 +233,9 @@ public class MainActivity extends Activity {
         nextButton.setTextSize(34);
         nextButton.setAllCaps(false);
         nextButton.setMinHeight(dp(78));
-        navRow.addView(nextButton, new LinearLayout.LayoutParams(dp(92), ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams nextParams = new LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT);
+        nextParams.setMargins(dp(8), 0, 0, 0);
+        navRow.addView(nextButton, nextParams);
 
         pageSeek = new SeekBar(this);
         pageSeek.setMax(0);
@@ -278,7 +282,7 @@ public class MainActivity extends Activity {
         textEdit.setTextSize(22);
         textEdit.setGravity(Gravity.TOP | Gravity.START);
         textEdit.setSingleLine(false);
-        textEdit.setMinLines(8);
+        textEdit.setMinLines(7);
         textEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         textEdit.setHint("Paste long text here. The app will paginate pasted text so you can flip pages with the arrows, then tap Play all.");
         textEdit.setPadding(dp(12), dp(12), dp(12), dp(12));
@@ -305,7 +309,7 @@ public class MainActivity extends Activity {
         buttonRow.addView(playClipboardButton, clipParams);
 
         playTextButton = new Button(this);
-        playTextButton.setText("Play all");
+        playTextButton.setText("Play Text");
         playTextButton.setAllCaps(false);
         playTextButton.setTextSize(22);
         playTextButton.setMinHeight(dp(96));
@@ -389,7 +393,7 @@ public class MainActivity extends Activity {
         });
 
         updatePageViews();
-        applyThemeToTree(root);
+        applyAppTheme();
         setContentView(root);
     }
 
@@ -449,6 +453,31 @@ public class MainActivity extends Activity {
                 .setPositiveButton("Clear", (dialog, which) -> clearCurrentTextSession("Cleared current text. Speech history is kept."))
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private void showClearHistoryDialog() {
+        ArrayList<JSONObject> sessions = readHistorySessions();
+        if (sessions.isEmpty()) {
+            setStatus("Speech history is already empty.");
+            toast("History empty");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Clear saved speech history?")
+                .setMessage("This deletes saved session metadata and offline audio. The current text editor and transient cache are kept.")
+                .setPositiveButton("Clear History", (dialog, which) -> clearHistoryStorage())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void clearHistoryStorage() {
+        int count = deleteChildren(getHistoryRootDir());
+        //noinspection ResultOfMethodCallIgnored
+        getHistoryRootDir().delete();
+        currentSessionId = "";
+        currentSessionCreatedAt = 0L;
+        updatePageViews();
+        setStatus("Cleared speech history storage (" + count + " file/folder entries removed). Current text is kept.");
     }
 
     private void clearCurrentTextSession(String status) {
@@ -709,10 +738,14 @@ public class MainActivity extends Activity {
     }
 
     private void pregenerateNextPages(int count, boolean announce) {
-        if (pages.isEmpty()) {
+        pregeneratePagesFrom(currentPage + 1, count, announce);
+    }
+
+    private void pregeneratePagesFrom(int startPageIndex, int count, boolean announce) {
+        if (pages.isEmpty() || count <= 0) {
             return;
         }
-        final int start = currentPage + 1;
+        final int start = Math.max(0, Math.min(startPageIndex, pages.size()));
         final int end = Math.min(pages.size(), start + count);
         final String sessionId = currentSessionId;
         if (start >= end) {
@@ -1693,6 +1726,10 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean historyEnabled() {
+        return getHistoryLimit() > 0;
+    }
+
     private int getPrefetchPages() {
         try {
             int value = Integer.parseInt(prefString("prefetchPages", "5").trim());
@@ -1724,6 +1761,17 @@ public class MainActivity extends Activity {
 
     private int colorButton() {
         return isDarkMode() ? Color.rgb(58, 58, 58) : Color.rgb(232, 232, 232);
+    }
+
+    private void applyAppTheme() {
+        if (rootLayout != null) {
+            rootLayout.setBackgroundColor(colorBackground());
+            applyThemeToTree(rootLayout);
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            getWindow().setStatusBarColor(colorBackground());
+            getWindow().setNavigationBarColor(colorBackground());
+        }
     }
 
     private void applyThemeToTree(View view) {
@@ -1769,7 +1817,18 @@ public class MainActivity extends Activity {
         return new File(historySessionDir(sessionId), "session.json");
     }
 
+    private File historyAudioDir(String sessionId) {
+        return new File(historySessionDir(sessionId), "audio");
+    }
+
     private File historyAudioFileFor(String sessionId, int pageIndex, String text) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return null;
+        }
+        return new File(historyAudioDir(sessionId), audioFileNameFor(pageIndex, text));
+    }
+
+    private File legacyHistoryAudioFileFor(String sessionId, int pageIndex, String text) {
         if (sessionId == null || sessionId.trim().isEmpty()) {
             return null;
         }
@@ -1782,7 +1841,7 @@ public class MainActivity extends Activity {
     }
 
     private void ensureCurrentHistorySession() {
-        if (fullText == null || fullText.trim().isEmpty()) {
+        if (!historyEnabled() || fullText == null || fullText.trim().isEmpty()) {
             currentSessionId = "";
             currentSessionCreatedAt = 0L;
             return;
@@ -1843,7 +1902,7 @@ public class MainActivity extends Activity {
     }
 
     private void persistCurrentHistoryMetadata() {
-        if (currentSessionId == null || currentSessionId.trim().isEmpty() || fullText == null || fullText.trim().isEmpty()) {
+        if (!historyEnabled() || currentSessionId == null || currentSessionId.trim().isEmpty() || fullText == null || fullText.trim().isEmpty()) {
             return;
         }
         try {
@@ -1865,7 +1924,7 @@ public class MainActivity extends Activity {
             meta.put("title", titleForText(fullText));
             meta.put("text", fullText);
             meta.put("settings", currentSettingsSnapshot());
-            meta.put("audioCount", countAvailableAudioFilesForSession(currentSessionId));
+            meta.put("audioCount", countAudioFilesInSession(currentSessionId));
             writeString(new File(dir, "session.json"), meta.toString(2));
             pruneHistoryToLimit();
         } catch (Exception ignored) {
@@ -1884,7 +1943,7 @@ public class MainActivity extends Activity {
     }
 
     private void persistGeneratedAudio(String sessionId, int pageIndex, String text, File source) {
-        if (sessionId == null || sessionId.trim().isEmpty() || source == null || !source.exists() || source.length() == 0) {
+        if (!historyEnabled() || sessionId == null || sessionId.trim().isEmpty() || source == null || !source.exists() || source.length() == 0) {
             return;
         }
         try {
@@ -1915,9 +1974,16 @@ public class MainActivity extends Activity {
         if (cached.exists() && cached.length() > 0) {
             return cached;
         }
+        if (!historyEnabled()) {
+            return null;
+        }
         File historical = historyAudioFileFor(sessionId, pageIndex, text);
         if (historical != null && historical.exists() && historical.length() > 0) {
             return historical;
+        }
+        File legacy = legacyHistoryAudioFileFor(sessionId, pageIndex, text);
+        if (legacy != null && legacy.exists() && legacy.length() > 0) {
+            return legacy;
         }
         return null;
     }
@@ -1954,7 +2020,7 @@ public class MainActivity extends Activity {
         if (have >= pages.size()) {
             return "Track: complete/offline";
         }
-        return String.format(Locale.US, "Track: %s %d/%d", fetching ? "fetching" : "built", have, pages.size());
+        return String.format(Locale.US, "Track: %s (%d/%d ready)", fetching ? "fetching" : "partial", have, pages.size());
     }
 
     private int getActiveGenerationCount() {
@@ -2006,7 +2072,7 @@ public class MainActivity extends Activity {
             updatePageViews();
             return;
         }
-        pregenerateNextPages(count, announce);
+        pregeneratePagesFrom(start, count, announce);
     }
 
     private ArrayList<JSONObject> readHistorySessions() {
@@ -2031,6 +2097,15 @@ public class MainActivity extends Activity {
 
     private void pruneHistoryToLimit() {
         int limit = getHistoryLimit();
+        File root = getHistoryRootDir();
+        if (limit <= 0) {
+            deleteChildren(root);
+            //noinspection ResultOfMethodCallIgnored
+            root.delete();
+            currentSessionId = "";
+            currentSessionCreatedAt = 0L;
+            return;
+        }
         ArrayList<JSONObject> sessions = readHistorySessions();
         for (int i = limit; i < sessions.size(); i++) {
             String id = sessions.get(i).optString("id", "");
@@ -2043,6 +2118,11 @@ public class MainActivity extends Activity {
     }
 
     private void showHistoryDialog() {
+        if (!historyEnabled()) {
+            setStatus("Speech history is disabled. Increase 'History sessions to keep' in Settings to enable it.");
+            toast("History disabled");
+            return;
+        }
         ArrayList<JSONObject> sessions = readHistorySessions();
         if (sessions.isEmpty()) {
             setStatus("No generated speech history yet.");
@@ -2128,13 +2208,20 @@ public class MainActivity extends Activity {
     }
 
     private int countAudioFilesInSession(String sessionId) {
-        File dir = historySessionDir(sessionId);
-        File[] files = dir.listFiles();
+        return countAudioFilesInDir(historySessionDir(sessionId));
+    }
+
+    private int countAudioFilesInDir(File dir) {
+        File[] files = dir == null ? null : dir.listFiles();
         if (files == null) {
             return 0;
         }
         int count = 0;
         for (File f : files) {
+            if (f.isDirectory()) {
+                count += countAudioFilesInDir(f);
+                continue;
+            }
             String name = f.getName().toLowerCase(Locale.US);
             if (f.isFile() && (name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".aac") || name.endsWith(".flac") || name.endsWith(".opus") || name.endsWith(".pcm"))) {
                 count++;
@@ -2192,7 +2279,6 @@ public class MainActivity extends Activity {
     private void showSettingsDialog() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
-        rootLayout = root;
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(14);
         root.setPadding(pad, pad, pad, pad);
@@ -2269,7 +2355,9 @@ public class MainActivity extends Activity {
         LinearLayout sessionButtons = row(root);
         Button loadButton = addDialogButton(sessionButtons, "Load Last Session", 1);
         Button historyDialogButton = addDialogButton(sessionButtons, "History", 1);
-        Button pregenerateButton = addDialogButton(sessionButtons, "Pre-gen Next 3", 1);
+        LinearLayout maintenanceButtons = row(root);
+        Button pregenerateButton = addDialogButton(maintenanceButtons, "Pre-gen Next 3", 1);
+        Button clearHistoryButton = addDialogButton(maintenanceButtons, "Clear History", 1);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setView(scroll)
@@ -2309,8 +2397,11 @@ public class MainActivity extends Activity {
                     rebuildPlaybackProgressIndex();
                     currentPage = Math.max(0, Math.min(keepPage, Math.max(0, pages.size() - 1)));
                 }
+                if (historyEnabled() && !fullText.trim().isEmpty()) {
+                    ensureCurrentHistorySession();
+                }
                 updatePageViews();
-                applyThemeToTree(rootLayout);
+                applyAppTheme();
                 pruneHistoryToLimit();
                 ensurePrefetchAhead(currentPage, false);
                 if (playbackSeek != null && !playbackSeekUserTouch) {
@@ -2332,6 +2423,7 @@ public class MainActivity extends Activity {
         loadButton.setOnClickListener(v -> restoreLastSession(false));
         historyDialogButton.setOnClickListener(v -> showHistoryDialog());
         pregenerateButton.setOnClickListener(v -> pregenerateNextPages(3, true));
+        clearHistoryButton.setOnClickListener(v -> showClearHistoryDialog());
 
         dialog.show();
         applyThemeToTree(scroll);
@@ -2482,7 +2574,8 @@ public class MainActivity extends Activity {
     private LinearLayout row(LinearLayout parent) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(0, dp(4), 0, dp(4));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(5), 0, dp(5));
         parent.addView(row, matchWrap());
         return row;
     }
@@ -2529,8 +2622,9 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setAllCaps(false);
         button.setTextSize(15);
+        button.setMinHeight(dp(48));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight);
-        params.setMargins(dp(2), 0, dp(2), 0);
+        params.setMargins(dp(3), dp(2), dp(3), dp(2));
         parent.addView(button, params);
         return button;
     }

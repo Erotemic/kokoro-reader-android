@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Polished main-screen spacing and fixed the duplicated previous-page button layout bug.
+- Fixed settings-dialog theming so it no longer overwrites the main root view reference.
+- Added a saved-history clear action with confirmation.
+- Changed saved history audio to live under per-session `audio/` folders while keeping a legacy fallback for older development builds.
+- Made `History sessions to keep = 0` consistently disable and prune saved speech history.
+- Fixed prefetching to start from the page after the currently playing page, not just the current UI page.
+- Improved HUD track status wording for partial/fetching/complete states.
+- Added `docs/` specifications, storage design, playback/prefetch notes, UX notes, and a manual test plan.
+
 ## 0.5.1
 
 - Added a main-screen **Clear Text** button that clears the current editor/session while preserving speech history and saved audio.

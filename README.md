@@ -80,9 +80,19 @@ For best Android playback compatibility, start with `mp3`.
 
 Generated sessions are saved in app-private storage as a bounded history list. The **History** button opens a table of previous text-to-speech sessions; selecting a row loads that text and starts playback from the saved session. When audio files are available, the app reuses the saved files so old sessions can be replayed offline without calling Kokoro again.
 
-The history limit is configurable in Settings. Set it to `0` if you do not want old sessions retained. The transient audio cache can still be cleared without deleting saved history audio.
+Each history session stores `session.json` plus page audio under an `audio/` subfolder. The history limit is configurable in Settings. Set it to `0` if you do not want old sessions retained; saving settings with `0` prunes saved history. The transient audio cache can still be cleared without deleting saved history audio. A separate **Clear History** action deletes saved session metadata and offline audio without clearing the current editor text.
 
 While playback starts, the app opportunistically prefetches subsequent pages. This helps the whole-text progress bar become more accurate, reduces gaps between pages, and improves resilience to Kokoro/server lag or brief network glitches. The HUD shows whether the track is still fetching or is complete/offline.
+
+## Project documentation
+
+The `docs/` folder now records the intended behavior and maintenance notes:
+
+- `docs/SPEC.md` - product and feature specification.
+- `docs/STORAGE.md` - cache/history storage layout and retention policy.
+- `docs/PLAYBACK_AND_PREFETCH.md` - progress, seeking, auto-advance, and prefetch design.
+- `docs/UX_NOTES.md` - UI/UX polishing guidelines.
+- `docs/TEST_PLAN.md` - manual test checklist for debug builds.
 
 ## Endpoint assumption
 
