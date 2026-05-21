@@ -45,6 +45,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "kokoro_reader_prefs";
+    private static final String DEFAULT_SERVER_BASE = "http://10.0.2.2:8880";
 
     private TextView statusView;
     private TextView pageLabel;
@@ -840,7 +841,7 @@ public class MainActivity extends Activity {
     }
 
     private String getServerBase() {
-        return normalizeServer(prefString("server", "http://100.x.y.z:8880"));
+        return normalizeServer(prefString("server", DEFAULT_SERVER_BASE));
     }
 
     private String normalizeServer(String value) {
@@ -849,7 +850,7 @@ public class MainActivity extends Activity {
             out = out.substring(0, out.length() - 1);
         }
         if (out.isEmpty()) {
-            out = "http://100.x.y.z:8880";
+            out = DEFAULT_SERVER_BASE;
         }
         return out;
     }

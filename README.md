@@ -45,7 +45,7 @@ You can also open **Settings -> Load Last Session**.
 
 The Settings dialog includes:
 
-- server URL, e.g. `http://100.x.y.z:8880`
+- server URL, e.g. `http://10.0.2.2:8880`
 - model, default `kokoro`
 - voice or voice mix, e.g. `af_bella` or `af_bella+af_sky`
 - **Fetch Voices** from `/v1/audio/voices`
