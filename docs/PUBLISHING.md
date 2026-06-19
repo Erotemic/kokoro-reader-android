@@ -30,6 +30,12 @@ Resolution order:
 
 The value is not in the repo, but it is in the built APK. Do not distribute a debug APK if the endpoint should remain private.
 
+## Build metadata
+
+Every APK also embeds non-secret build metadata into `BuildConfig`: UTC build time, short Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Settings shows these values under **Build information** and includes a **Copy Build Info** button.
+
+If the checkout does not have `.git` metadata, the Git values fall back to `unknown`; builds should still succeed from source archives.
+
 ## Before the first public GitHub push
 
 If a private endpoint was committed previously, rewrite local history before pushing publicly. Replace the placeholder below with the old committed URL or host.

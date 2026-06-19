@@ -52,7 +52,7 @@ You can also open **Settings -> Load Last Session**.
 
 The Settings dialog includes:
 
-- server URL, e.g. `http://10.0.2.2:8880`
+- server URL, e.g. `http://10.0.2.2:8880` for the Android emulator or `http://YOUR-LAN-HOST:8880` for a phone on your LAN/VPN
 - model, default `kokoro`
 - voice or voice mix, e.g. `af_bella` or `af_bella+af_sky`
 - **Health Check**, which tries `/health` and then `/v1/audio/voices`
@@ -72,6 +72,7 @@ The Settings dialog includes:
 - max speech-history sessions to keep
 - prefetch pages-ahead count
 - dark / light mode, defaulting to dark
+- build information: app version, build type, build date, Git SHA, Git commit date, branch, describe string, and clean/dirty tree state
 
 For best Android playback compatibility, start with `mp3`.
 
@@ -166,6 +167,25 @@ The debug APK will be here:
 ```bash
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+### Local server config
+
+The committed default Kokoro endpoint is `http://10.0.2.2:8880`, which points an Android emulator back to the host machine. For a physical phone, put your private LAN or VPN endpoint in a local ignored config file:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
+```dotenv
+KOKORO_SERVER_BASE=http://YOUR-LAN-OR-VPN-HOST:8880
+```
+
+Gradle injects that value into `BuildConfig.DEFAULT_SERVER_BASE` when building the APK. The value is not committed, but it is still present inside the APK installed on your phone.
+
+### Build metadata
+
+Settings shows a **Build information** section with app version, build type, UTC build date, Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Gradle reads these from the local Git checkout when available. If you build from a source archive without `.git`, the Git fields fall back to `unknown`.
 
 ## Install on Pixel 5
 

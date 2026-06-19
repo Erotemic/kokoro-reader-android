@@ -2,6 +2,98 @@ plugins {
     id 'com.android.application'
 }
 
+def parseDotEnvFile(File file) {
+    def values = [:]
+    if (!file.isFile()) {
+        return values
+    }
+    file.eachLine('UTF-8') { rawLine ->
+        def line = rawLine.trim()
+        if (!line.isEmpty() && !line.startsWith('#')) {
+            if (line.startsWith('export ')) {
+                line = line.substring('export '.length()).trim()
+            }
+            int equalsAt = line.indexOf('=')
+            if (equalsAt > 0) {
+                def key = line.substring(0, equalsAt).trim()
+                def value = line.substring(equalsAt + 1).trim()
+                if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+                    value = value.substring(1, value.length() - 1)
+                }
+                values[key] = value
+            }
+        }
+    }
+    return values
+}
+
+def localProperties = new java.util.Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.isFile()) {
+    localPropertiesFile.withInputStream { stream -> localProperties.load(stream) }
+}
+
+def dotEnv = parseDotEnvFile(rootProject.file('.env'))
+def dotEnvLocal = parseDotEnvFile(rootProject.file('.env.local'))
+
+def resolveLocalConfig = { String envName, String propertyName, String defaultValue ->
+    def candidates = [
+        System.getenv(envName),
+        project.findProperty(propertyName)?.toString(),
+        dotEnvLocal[envName],
+        dotEnv[envName],
+        localProperties.getProperty(propertyName),
+        localProperties.getProperty(envName),
+    ]
+    for (def candidate : candidates) {
+        if (candidate != null && candidate.toString().trim()) {
+            return candidate.toString().trim()
+        }
+    }
+    return defaultValue
+}
+
+def buildConfigString = { String value ->
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+}
+
+def runGitCommand = { List<String> args, String fallback ->
+    try {
+        def stdout = new ByteArrayOutputStream()
+        def stderr = new ByteArrayOutputStream()
+        def result = exec {
+            commandLine(['git', '-C', rootProject.rootDir.absolutePath] + args)
+            standardOutput = stdout
+            errorOutput = stderr
+            ignoreExitValue = true
+        }
+        if (result.exitValue == 0) {
+            def value = stdout.toString('UTF-8').trim()
+            if (value) {
+                return value
+            }
+        }
+    } catch (Exception ignored) {
+        // Source archives and CI environments may not have Git metadata available.
+    }
+    return fallback
+}
+
+def buildTimeUtc = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.TimeZone.getTimeZone('UTC'))
+def gitSha = runGitCommand(['rev-parse', '--short=12', 'HEAD'], 'unknown')
+def gitCommitTimeUtc = runGitCommand(['log', '-1', '--format=%cI'], 'unknown')
+def gitBranch = runGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], 'unknown')
+def gitDescribe = runGitCommand(['describe', '--always', '--dirty', '--tags'], gitSha)
+def gitStatus = runGitCommand(['status', '--porcelain', '--untracked-files=no'], '')
+def gitTreeState = gitStatus ? 'dirty' : (gitSha == 'unknown' ? 'unknown' : 'clean')
+
+def defaultKokoroServerBase = resolveLocalConfig(
+        'KOKORO_SERVER_BASE',
+        'kokoro.serverBase',
+        'http://10.0.2.2:8880'
+)
+
+
 android {
     namespace 'com.crall.kokororeader'
     compileSdk 35
@@ -12,6 +104,17 @@ android {
         targetSdk 35
         versionCode 10
         versionName '0.6.0'
+        buildConfigField 'String', 'DEFAULT_SERVER_BASE', buildConfigString(defaultKokoroServerBase)
+        buildConfigField 'String', 'BUILD_TIME_UTC', buildConfigString(buildTimeUtc)
+        buildConfigField 'String', 'GIT_SHA', buildConfigString(gitSha)
+        buildConfigField 'String', 'GIT_COMMIT_TIME_UTC', buildConfigString(gitCommitTimeUtc)
+        buildConfigField 'String', 'GIT_BRANCH', buildConfigString(gitBranch)
+        buildConfigField 'String', 'GIT_DESCRIBE', buildConfigString(gitDescribe)
+        buildConfigField 'String', 'GIT_TREE_STATE', buildConfigString(gitTreeState)
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     sourceSets {

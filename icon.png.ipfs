@@ -1,0 +1,26 @@
+type: ipfs-sidecar
+cid: bafybeiei5343esmqvaykx2kj5p3dpahcx5msvrk2keglkk3w6zhz5q57ru
+rel_path: icon.png
+size: 1.84 MiB
+num_items: 1
+add_config:
+  path: icon.png
+  name: null
+  recursive: true
+  progress: true
+  cid_version: 1
+  raw_leaves: false
+  only_hash: false
+  pin: true
+  sidecar: true
+  update_gitignore: true
+  git_add_sidecar: true
+  dry_run: false
+add_datetime: 2026-06-19T141444-5
+add_duration: 1.001171424984932
+local_quickstat:
+  kind: file
+  bytes: 1925572
+  mtime: 1779333837.6374054
+pin_name: pkg:github/Erotemic/kokoro-reader-android#icon.png
+pin_name_source: generated

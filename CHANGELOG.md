@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added Settings build information with app version, build type, UTC build date, Git SHA, commit date, branch, describe string, clean/dirty tree state, and a copy button.
+
 ## 0.6.0
 
 - Polished main-screen spacing and fixed the duplicated previous-page button layout bug.

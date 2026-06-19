@@ -52,8 +52,13 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "kokoro_reader_prefs";
-    private static final String DEFAULT_SERVER_BASE = "http://10.0.2.2:8880";
+    private static final String DEFAULT_SERVER_BASE = BuildConfig.DEFAULT_SERVER_BASE;
     private static final int PAGE_PROGRESS_MAX = 1000;
+    private static final int DEFAULT_MAX_CHARS = 900;
+    private static final int MIN_MAX_CHARS = 300;
+    private static final int SAFE_MAX_CHARS = 1200;
+    private static final int DEFAULT_AUTO_NEXT_DELAY_MS = 650;
+    private static final int MAX_AUTO_NEXT_DELAY_MS = 5000;
 
     private TextView statusView;
     private TextView pageLabel;
@@ -101,6 +106,7 @@ public class MainActivity extends Activity {
     private int pendingSeekPageOffsetUnits = -1;
     private String currentSessionId = "";
     private long currentSessionCreatedAt = 0L;
+    private Runnable pendingAutoAdvanceRunnable;
 
     private final Runnable playbackProgressTicker = new Runnable() {
         @Override
@@ -1376,6 +1382,42 @@ public class MainActivity extends Activity {
         pendingSeekPageOffsetUnits = -1;
     }
 
+    private void clearPendingAutoAdvance() {
+        if (pendingAutoAdvanceRunnable != null) {
+            mainHandler.removeCallbacks(pendingAutoAdvanceRunnable);
+            pendingAutoAdvanceRunnable = null;
+        }
+    }
+
+    private void scheduleAutoAdvanceAfterCompletion(int completedPageIndex) {
+        clearPendingAutoAdvance();
+        final int nextPageIndex = completedPageIndex + 1;
+        if (nextPageIndex < 0 || nextPageIndex >= pages.size()) {
+            setStatus("Finished page " + (completedPageIndex + 1) + ".");
+            return;
+        }
+        int delayMs = getAutoNextDelayMs();
+        setStatus("Finished page " + (completedPageIndex + 1) + ". Starting page " + (nextPageIndex + 1) + (delayMs > 0 ? " after a short pause." : "."));
+        pendingAutoAdvanceRunnable = () -> {
+            pendingAutoAdvanceRunnable = null;
+            if (pages.isEmpty()) {
+                return;
+            }
+            if (completedPageIndex >= pages.size() - 1) {
+                return;
+            }
+            currentPage = nextPageIndex;
+            saveSession();
+            updatePageViews();
+            generateAndPlayCurrentPage();
+        };
+        if (delayMs > 0) {
+            mainHandler.postDelayed(pendingAutoAdvanceRunnable, delayMs);
+        } else {
+            mainHandler.post(pendingAutoAdvanceRunnable);
+        }
+    }
+
     private String formatDuration(int ms) {
         int totalSeconds = Math.max(0, ms / 1000);
         int minutes = totalSeconds / 60;
@@ -1444,11 +1486,8 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                     setPlaybackLabel("Finished page " + (pageIndex + 1) + ".");
                 }
-                if (prefBool("autoNext", true) && currentPage + 1 < pages.size()) {
-                    currentPage++;
-                    saveSession();
-                    updatePageViews();
-                    generateAndPlayCurrentPage();
+                if (prefBool("autoNext", true) && pageIndex + 1 < pages.size()) {
+                    scheduleAutoAdvanceAfterCompletion(pageIndex);
                 } else {
                     setStatus("Finished page " + (pageIndex + 1) + ".");
                 }
@@ -1475,6 +1514,7 @@ public class MainActivity extends Activity {
 
     private void releasePlayer() {
         stopProgressTicker();
+        clearPendingAutoAdvance();
         if (player != null) {
             try {
                 player.stop();
@@ -1685,10 +1725,19 @@ public class MainActivity extends Activity {
 
     private int getMaxChars() {
         try {
-            int value = Integer.parseInt(prefString("maxChars", "3200").trim());
-            return Math.max(500, Math.min(12000, value));
+            int value = Integer.parseInt(prefString("maxChars", String.valueOf(DEFAULT_MAX_CHARS)).trim());
+            return Math.max(MIN_MAX_CHARS, Math.min(SAFE_MAX_CHARS, value));
         } catch (Exception ex) {
-            return 3200;
+            return DEFAULT_MAX_CHARS;
+        }
+    }
+
+    private int getAutoNextDelayMs() {
+        try {
+            int value = Integer.parseInt(prefString("autoNextDelayMs", String.valueOf(DEFAULT_AUTO_NEXT_DELAY_MS)).trim());
+            return Math.max(0, Math.min(MAX_AUTO_NEXT_DELAY_MS, value));
+        } catch (Exception ex) {
+            return DEFAULT_AUTO_NEXT_DELAY_MS;
         }
     }
 
@@ -1871,7 +1920,8 @@ public class MainActivity extends Activity {
         settings.put("responseFormat", getResponseFormat());
         settings.put("stream", prefBool("stream", true));
         settings.put("langCode", getLangCode());
-        settings.put("maxChars", prefString("maxChars", "3200"));
+        settings.put("maxChars", String.valueOf(getMaxChars()));
+        settings.put("autoNextDelayMs", String.valueOf(getAutoNextDelayMs()));
         settings.put("normalize", prefBool("normalize", true));
         settings.put("unitNorm", prefBool("unitNorm", false));
         settings.put("urlNorm", prefBool("urlNorm", true));
@@ -1886,7 +1936,7 @@ public class MainActivity extends Activity {
             return;
         }
         SharedPreferences.Editor editor = prefs.edit();
-        String[] stringKeys = new String[]{"server", "model", "voice", "speed", "playbackRate", "responseFormat", "langCode", "maxChars"};
+        String[] stringKeys = new String[]{"server", "model", "voice", "speed", "playbackRate", "responseFormat", "langCode", "maxChars", "autoNextDelayMs"};
         for (String key : stringKeys) {
             if (settings.has(key)) {
                 editor.putString(key, settings.optString(key, prefString(key, "")));
@@ -2276,6 +2326,46 @@ public class MainActivity extends Activity {
         return new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(timeMs));
     }
 
+    private String getBuildInfoText() {
+        return "App version: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")\n"
+                + "Application ID: " + BuildConfig.APPLICATION_ID + "\n"
+                + "Build type: " + BuildConfig.BUILD_TYPE + "\n"
+                + "Build date: " + BuildConfig.BUILD_TIME_UTC + "\n"
+                + "Git SHA: " + BuildConfig.GIT_SHA + "\n"
+                + "Git commit date: " + BuildConfig.GIT_COMMIT_TIME_UTC + "\n"
+                + "Git branch: " + BuildConfig.GIT_BRANCH + "\n"
+                + "Git describe: " + BuildConfig.GIT_DESCRIBE + "\n"
+                + "Git tree state: " + BuildConfig.GIT_TREE_STATE;
+    }
+
+    private void addBuildInfoSection(LinearLayout parent) {
+        TextView heading = new TextView(this);
+        heading.setText("Build information");
+        heading.setTextSize(18);
+        heading.setPadding(0, dp(18), 0, dp(4));
+        parent.addView(heading, matchWrap());
+
+        TextView info = new TextView(this);
+        info.setText(getBuildInfoText());
+        info.setTextSize(13);
+        info.setTextIsSelectable(true);
+        info.setTypeface(android.graphics.Typeface.MONOSPACE);
+        info.setPadding(dp(8), dp(8), dp(8), dp(8));
+        parent.addView(info, matchWrap());
+
+        LinearLayout buildButtons = row(parent);
+        Button copyBuildInfoButton = addDialogButton(buildButtons, "Copy Build Info", 1);
+        copyBuildInfoButton.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                toast("Clipboard is not available.");
+                return;
+            }
+            clipboard.setPrimaryClip(ClipData.newPlainText("Kokoro Reader build info", getBuildInfoText()));
+            toast("Build info copied.");
+        });
+    }
+
     private void showSettingsDialog() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -2327,8 +2417,8 @@ public class MainActivity extends Activity {
 
         LinearLayout row4 = row(root);
         LinearLayout charsCol = col(row4, 1);
-        addLabel(charsCol, "Chars per page/chunk");
-        EditText maxCharsEdit = addDialogEdit(charsCol, prefString("maxChars", "3200"), true, 1);
+        addLabel(charsCol, "Chars per page/chunk (safe cap " + SAFE_MAX_CHARS + ")");
+        EditText maxCharsEdit = addDialogEdit(charsCol, String.valueOf(getMaxChars()), true, 1);
         maxCharsEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
         LinearLayout historyCol = col(row4, 1);
         addLabel(historyCol, "History sessions to keep");
@@ -2338,6 +2428,9 @@ public class MainActivity extends Activity {
         CheckBox darkModeBox = addDialogCheck(root, "Dark mode", prefBool("darkMode", true));
         CheckBox streamBox = addDialogCheck(root, "Ask server to stream response", prefBool("stream", true));
         CheckBox autoNextBox = addDialogCheck(root, "Auto-generate/play next page", prefBool("autoNext", true));
+        addLabel(root, "Pause before auto-next, milliseconds");
+        EditText autoNextDelayEdit = addDialogEdit(root, String.valueOf(getAutoNextDelayMs()), true, 1);
+        autoNextDelayEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
         addLabel(root, "Pages to prefetch ahead while playing");
         EditText prefetchEdit = addDialogEdit(root, prefString("prefetchPages", "5"), true, 1);
         prefetchEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -2359,6 +2452,8 @@ public class MainActivity extends Activity {
         Button pregenerateButton = addDialogButton(maintenanceButtons, "Pre-gen Next 3", 1);
         Button clearHistoryButton = addDialogButton(maintenanceButtons, "Clear History", 1);
 
+        addBuildInfoSection(root);
+
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setView(scroll)
                 .setPositiveButton("Save", null)
@@ -2377,6 +2472,7 @@ public class MainActivity extends Activity {
                         .putString("langCode", langCodeEdit.getText().toString().trim())
                         .putString("maxChars", maxCharsEdit.getText().toString().trim())
                         .putString("historyLimit", historyLimitEdit.getText().toString().trim())
+                        .putString("autoNextDelayMs", autoNextDelayEdit.getText().toString().trim())
                         .putString("prefetchPages", prefetchEdit.getText().toString().trim())
                         .putBoolean("darkMode", darkModeBox.isChecked())
                         .putBoolean("stream", streamBox.isChecked())
