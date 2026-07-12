@@ -53,7 +53,6 @@ Dark mode is default for comfortable listening. Light mode exists for bright con
 
 These are intentionally not implemented yet, but the current architecture should not block them:
 
-- foreground service / notification controls;
 - Bluetooth media-button handling;
 - lock-screen controls;
 - history export/import;

@@ -41,6 +41,19 @@ Use this checklist after installing a debug build.
 - Let page 1 finish; confirm auto-next starts page 2 when enabled.
 - Disable auto-next and confirm playback stops after the current page.
 
+## Rotation and background playback
+
+- Start a multi-page document and rotate the phone while generation is active; confirm generation continues and playback starts once ready.
+- Rotate while audio is playing; confirm the same page continues from the same position without an audible restart.
+- Press Home or open another app; let the current page finish and confirm the next page is generated/played automatically.
+- Turn the screen off for longer than one page; confirm playback and auto-next continue.
+- Confirm the foreground notification shows the current page and offers Play/Pause and Stop.
+- Pause and resume from the notification while Kokoro Reader is not visible.
+- Stop from the notification; confirm audio, generation, and auto-next stop and the notification disappears.
+- Return to Kokoro Reader during background playback; confirm the page indicator, play/pause button, and progress bar synchronize with the service.
+- On Android 13+, deny notification permission once and confirm playback still starts without crashing; grant it and confirm controls appear normally.
+- Start one document, then immediately play different text; confirm the old queue cannot resume or overwrite the new queue.
+
 ## Whole-text vs current-page progress
 
 - Enable whole-text progress.

@@ -55,7 +55,11 @@ Playback is page-based because Kokoro generation is page/chunk-based. The app sh
 - allow pause/resume once a page is prepared;
 - allow dragging the playback bar to seek after the relevant page audio is prepared;
 - allow whole-document or current-page progress scope;
-- display when progress is an estimate rather than exact playback time.
+- display when progress is an estimate rather than exact playback time;
+- continue generation, playback, prefetch, and automatic page advancement while the screen is off or another app is foreground;
+- survive activity recreation and device rotation without restarting or losing the current page;
+- expose persistent notification controls while a playback queue is active;
+- pause appropriately when another app takes audio focus.
 
 ## Progress-bar modes
 

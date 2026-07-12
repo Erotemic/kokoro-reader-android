@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Moved speech generation, page auto-advance, prefetch, and `MediaPlayer` ownership into a foreground playback service.
+- Playback now survives rotation, screen-off, Home, and switching to another app.
+- Added a persistent playback notification with play/pause and stop controls.
+- Added audio-focus handling, wake-lock ownership, and durable active-document handoff between the activity and service.
+- Added Android 13+ notification permission handling and media-playback foreground-service declarations.
+- Fixed document replacement and stop/start races around rapid playback commands.
 - Added Settings build information with app version, build type, UTC build date, Git SHA, commit date, branch, describe string, clean/dirty tree state, and a copy button.
 
 ## 0.6.0

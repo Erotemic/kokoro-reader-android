@@ -6,6 +6,23 @@ Kokoro Reader sends one page/chunk of text at a time to Kokoro-FastAPI. The serv
 
 This design avoids generating an extremely long audio file for a whole document, but it means the app needs a document-level abstraction above page-level audio.
 
+## Lifecycle and background ownership
+
+Playback is owned by `PlaybackService`, not `MainActivity`. The service is a media-playback foreground service and owns:
+
+- the active paginated document and current page;
+- Kokoro generation and download progress;
+- `MediaPlayer`, playback rate, volume, and seeking;
+- auto-advance and future-page prefetch;
+- audio focus and the partial wake lock;
+- the persistent playback notification.
+
+`MainActivity` is a controller and view of the service snapshot. It may be stopped, recreated, rotated, or covered by another app without interrupting the queue. The current document is handed to the service through an app-private JSON file rather than intent extras, avoiding Binder-size limits for long documents. A process restart can reload that durable document when Android restarts the sticky service.
+
+Rotation is also declared as an activity configuration change so ordinary orientation changes do not rebuild the programmatic UI. Correctness does not depend on that optimization: playback remains service-owned even when Android recreates the activity for another reason.
+
+The foreground notification exposes play/pause and stop. Playback requests audio focus and pauses on full or transient focus loss. A partial wake lock is held only while generation or active playback needs the CPU, allowing screen-off playback and page advancement without keeping the display awake.
+
 ## Exact progress vs estimated progress
 
 There are three useful progress states:

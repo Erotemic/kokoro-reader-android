@@ -1,15 +1,18 @@
 package com.crall.kokororeader;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.media.AudioAttributes;
-import android.media.MediaPlayer;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -87,26 +90,29 @@ public class MainActivity extends Activity {
     private int totalPlaybackUnits = 1;
     private boolean programmaticTextUpdate = false;
 
-    private MediaPlayer player;
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
 
-    private boolean playbackPrepared = false;
     private boolean playbackSeekUserTouch = false;
-    private boolean playbackGenerationActive = false;
-    private boolean playbackProgressIsEstimate = false;
-    private int preparedPageIndex = -1;
-    private int activePlaybackPageIndex = -1;
-    private long estimatedPlaybackStartedAt = 0L;
-    private long estimatedBytesRead = 0L;
-    private long estimatedBytesExpected = -1L;
-    private long lastProgressReportAt = 0L;
     private int pendingSeekPageIndex = -1;
     private int pendingSeekPageOffsetUnits = -1;
     private String currentSessionId = "";
     private long currentSessionCreatedAt = 0L;
-    private Runnable pendingAutoAdvanceRunnable;
+    private String activePlaybackDocumentId = "";
+    private boolean playbackReceiverRegistered = false;
+    private final BroadcastReceiver playbackStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+            applyPlaybackSnapshot(snapshot, true);
+            if (snapshot.queueActive) {
+                startProgressTicker();
+            } else {
+                stopProgressTicker();
+            }
+        }
+    };
 
     private final Runnable playbackProgressTicker = new Runnable() {
         @Override
@@ -160,16 +166,49 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        IntentFilter filter = new IntentFilter(PlaybackService.ACTION_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(playbackStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(playbackStateReceiver, filter);
+        }
+        playbackReceiverRegistered = true;
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        applyPlaybackSnapshot(snapshot, true);
+        if (snapshot.queueActive) {
+            startProgressTicker();
+        }
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
         saveSession();
     }
 
     @Override
+    protected void onStop() {
+        if (playbackReceiverRegistered) {
+            unregisterReceiver(playbackStateReceiver);
+            playbackReceiverRegistered = false;
+        }
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
-        super.onDestroy();
-        releasePlayer();
+        stopProgressTicker();
         executor.shutdownNow();
+        super.onDestroy();
+    }
+
+    private void ensurePlaybackNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1401);
+        }
     }
 
     private void buildUi() {
@@ -440,7 +479,13 @@ public class MainActivity extends Activity {
     }
 
     private void playAllFromCurrentPage() {
-        if (!ensurePagesFromTextBox()) {
+        String visible = textEdit == null ? "" : textEdit.getText().toString();
+        boolean needsPagination = pages.isEmpty();
+        if (!needsPagination && currentPage >= 0 && currentPage < pages.size()) {
+            needsPagination = !visible.trim().equals(pages.get(currentPage).trim());
+        }
+        if (needsPagination) {
+            paginateTextBox(true);
             return;
         }
         clearPendingDocumentSeek();
@@ -532,7 +577,9 @@ public class MainActivity extends Activity {
     }
 
     private void setFullTextAndPaginate(String raw, int desiredPage, boolean autoPlay, String prefix) {
-        releasePlayer();
+        if (!autoPlay) {
+            releasePlayer();
+        }
         String normalized = normalizeCopiedText(raw);
         fullText = normalized;
         pages.clear();
@@ -694,56 +741,26 @@ public class MainActivity extends Activity {
             }
         }
         saveSession();
-        final int pageIndex = currentPage;
-        final String text = pages.get(pageIndex);
-        final File cached = audioFileFor(pageIndex, text);
-        File playable = findPlayableAudioFile(pageIndex, text);
-        if (playable != null && playable.exists() && playable.length() > 0) {
-            setStatus((playable.equals(cached) ? "Using cached" : "Using saved history") + " audio for page " + (pageIndex + 1) + ".");
-            playAudio(playable, pageIndex);
-            updatePageViews();
-            ensurePrefetchAhead(pageIndex, false);
-            return;
+        try {
+            PlaybackDocumentStore.Document document = PlaybackDocumentStore.write(
+                    this, pages, currentSessionId, currentPage);
+            activePlaybackDocumentId = document.id;
+            setEstimatedPlaybackProgress(currentPage, "Preparing page " + (currentPage + 1) + " in background");
+            setStatus("Starting background playback for page " + (currentPage + 1) + " of " + pages.size() + "...");
+            ensurePlaybackNotificationPermission();
+            PlaybackService.playDocument(this, currentPage, pendingSeekPageOffsetUnits);
+            clearPendingDocumentSeek();
+            startProgressTicker();
+        } catch (Exception ex) {
+            setStatus("Could not start background playback: " + ex.getMessage());
         }
-        if (playbackGenerationActive && activePlaybackPageIndex == pageIndex) {
-            setStatus("Already generating page " + (pageIndex + 1) + ".");
-            return;
-        }
-
-        setEstimatedPlaybackProgress(pageIndex, "Preparing page " + (pageIndex + 1) + "... waiting for Kokoro stream");
-        setStatus("Generating page " + (pageIndex + 1) + " of " + pages.size() + "...");
-        final String sessionId = currentSessionId;
-        executor.submit(() -> {
-            try {
-                File out = requestSpeech(text, pageIndex, sessionId);
-                mainHandler.post(() -> {
-                    if (activePlaybackPageIndex == pageIndex) {
-                        playbackGenerationActive = false;
-                    }
-                    updatePageViews();
-                    if (currentPage == pageIndex) {
-                        setStatus("Generated page " + (pageIndex + 1) + ". Playing.");
-                        playAudio(out, pageIndex);
-                        ensurePrefetchAhead(pageIndex, false);
-                    } else {
-                        setStatus("Generated page " + (pageIndex + 1) + ".");
-                    }
-                });
-            } catch (Exception ex) {
-                mainHandler.post(() -> {
-                    if (activePlaybackPageIndex == pageIndex) {
-                        playbackGenerationActive = false;
-                        playbackProgressIsEstimate = false;
-                        activePlaybackPageIndex = -1;
-                        resetPlaybackControls("Playback: generation failed");
-                    }
-                    setStatus("Generation failed: " + ex.getMessage());
-                });
-            }
-        });
     }
 
     private void pregenerateNextPages(int count, boolean announce) {
+        if (PlaybackService.getSnapshot().isActive()) {
+            setStatus("Background playback already owns prefetching for the active document.");
+            return;
+        }
         pregeneratePagesFrom(currentPage + 1, count, announce);
     }
 
@@ -848,25 +865,13 @@ public class MainActivity extends Activity {
             }
 
             File tmp = new File(cached.getAbsolutePath() + ".tmp");
-            long expectedBytes = conn.getContentLengthLong();
             try (InputStream is = new BufferedInputStream(conn.getInputStream());
                  FileOutputStream fos = new FileOutputStream(tmp)) {
                 byte[] buffer = new byte[8192];
                 int n;
-                long totalRead = 0L;
-                long lastReportedBytes = 0L;
-                reportDownloadProgress(pageIndex, totalRead, expectedBytes);
                 while ((n = is.read(buffer)) != -1) {
                     fos.write(buffer, 0, n);
-                    totalRead += n;
-                    long now = System.currentTimeMillis();
-                    if (totalRead - lastReportedBytes >= 65536 || now - lastProgressReportAt >= 750) {
-                        lastReportedBytes = totalRead;
-                        lastProgressReportAt = now;
-                        reportDownloadProgress(pageIndex, totalRead, expectedBytes);
-                    }
                 }
-                reportDownloadProgress(pageIndex, totalRead, totalRead);
             } finally {
                 conn.disconnect();
             }
@@ -931,77 +936,23 @@ public class MainActivity extends Activity {
     }
 
     private void setEstimatedPlaybackProgress(int pageIndex, String message) {
-        playbackGenerationActive = true;
-        playbackProgressIsEstimate = true;
-        playbackPrepared = false;
-        activePlaybackPageIndex = pageIndex;
-        preparedPageIndex = -1;
-        estimatedPlaybackStartedAt = System.currentTimeMillis();
-        estimatedBytesRead = 0L;
-        estimatedBytesExpected = -1L;
-        lastProgressReportAt = 0L;
         if (playPauseButton != null) {
             playPauseButton.setText("Play");
+            playPauseButton.setEnabled(false);
         }
         if (playbackSeek != null) {
             playbackSeek.setMax(getPlaybackBarMax());
             playbackSeek.setProgress(getPlaybackBarStartForPage(pageIndex));
         }
         setPlaybackLabel(message + " (" + getPlaybackScopeName() + " estimate)");
-        startProgressTicker();
-    }
-
-    private void reportDownloadProgress(int pageIndex, long bytesRead, long expectedBytes) {
-        mainHandler.post(() -> {
-            if (!playbackGenerationActive || activePlaybackPageIndex != pageIndex || currentPage != pageIndex) {
-                return;
-            }
-            playbackProgressIsEstimate = true;
-            estimatedBytesRead = bytesRead;
-            estimatedBytesExpected = expectedBytes;
-            int pageUnits = getPageProgressUnits(pageIndex);
-            int pageProgress;
-            String detail;
-            if (expectedBytes > 0) {
-                pageProgress = (int) Math.max(0, Math.min(pageUnits - 1, (bytesRead * (long) pageUnits) / Math.max(1L, expectedBytes)));
-                detail = String.format(Locale.US, "%d%%", Math.max(0, Math.min(99, (bytesRead * 100L) / Math.max(1L, expectedBytes))));
-            } else {
-                long elapsed = Math.max(0L, System.currentTimeMillis() - estimatedPlaybackStartedAt);
-                pageProgress = (int) Math.max(1, Math.min(pageUnits - 1, elapsed / 300));
-                detail = formatBytes(bytesRead);
-            }
-            int playbackProgress = getPlaybackBarProgressForPageOffsetUnits(pageIndex, pageProgress);
-            if (playbackSeek != null && !playbackSeekUserTouch) {
-                playbackSeek.setMax(getPlaybackBarMax());
-                playbackSeek.setProgress(playbackProgress);
-            }
-            setPlaybackLabel("Receiving Kokoro audio: " + detail + " (" + getPlaybackScopeName() + " stream estimate; seek available after full audio arrives)");
-        });
     }
 
     private void togglePlayPause() {
-        if (player != null && playbackPrepared) {
-            try {
-                if (player.isPlaying()) {
-                    player.pause();
-                    updatePlayPauseButton();
-                    updatePlaybackProgress();
-                    setStatus("Paused page " + (preparedPageIndex + 1) + ".");
-                } else {
-                    applyPlaybackRate(player);
-                    applyPlaybackVolume();
-                    player.start();
-                    updatePlayPauseButton();
-                    setStatus("Playing page " + (preparedPageIndex + 1) + " of " + pages.size() + ".");
-                    startProgressTicker();
-                }
-            } catch (Exception ex) {
-                setStatus("Could not toggle playback: " + ex.getMessage());
-            }
-            return;
-        }
-        if (playbackGenerationActive) {
-            setStatus("Audio is still being generated. Progress is an estimate until the full stream arrives.");
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        if (snapshot.prepared || snapshot.generationActive) {
+            PlaybackService.toggle(this);
+            applyPlaybackSnapshot(PlaybackService.getSnapshot(), false);
+            startProgressTicker();
             return;
         }
         playAllFromCurrentPage();
@@ -1018,33 +969,19 @@ public class MainActivity extends Activity {
         pendingSeekPageOffsetUnits = target.pageOffsetUnits;
         saveSession();
         updatePageViews();
-
-        if (player != null && playbackPrepared && preparedPageIndex == target.pageIndex) {
-            try {
-                int duration = player.getDuration();
-                int seekMs = msForPageOffsetUnits(target.pageIndex, target.pageOffsetUnits, duration);
-                player.seekTo(seekMs);
-                clearPendingDocumentSeek();
-                updatePlaybackProgress();
-                setStatus("Seeked to page " + (target.pageIndex + 1) + " at " + formatDuration(seekMs) + ".");
-                return;
-            } catch (Exception ex) {
-                setStatus("Seek failed: " + ex.getMessage());
-                return;
-            }
+        try {
+            PlaybackDocumentStore.Document document = PlaybackDocumentStore.write(
+                    this, pages, currentSessionId, currentPage);
+            activePlaybackDocumentId = document.id;
+            ensurePlaybackNotificationPermission();
+            PlaybackService.seek(this, target.pageIndex, target.pageOffsetUnits);
+            setStatus((useWholeTextProgress() ? "Seeking whole text to page " : "Seeking current page ")
+                    + (target.pageIndex + 1) + ".");
+            clearPendingDocumentSeek();
+            startProgressTicker();
+        } catch (Exception ex) {
+            setStatus("Seek failed: " + ex.getMessage());
         }
-
-        if (playbackGenerationActive && activePlaybackPageIndex == target.pageIndex) {
-            setStatus("Seeking to page " + (target.pageIndex + 1) + " when the Kokoro stream finishes.");
-            return;
-        }
-
-        if (useWholeTextProgress()) {
-            setStatus("Seeking whole text to page " + (target.pageIndex + 1) + ".");
-        } else {
-            setStatus("Seeking current page " + (target.pageIndex + 1) + ".");
-        }
-        generateAndPlayCurrentPage();
     }
 
     private void updatePlaybackLabelForScrub(int progress) {
@@ -1057,18 +994,17 @@ public class MainActivity extends Activity {
         }
         DocumentSeekTarget target = playbackSeekTargetForProgress(progress);
         int percent = Math.round((clampPlaybackBarProgress(progress) * 100f) / Math.max(1, getPlaybackBarMax()));
-        if (player != null && playbackPrepared && preparedPageIndex == target.pageIndex) {
-            try {
-                int duration = player.getDuration();
-                int seekMs = msForPageOffsetUnits(target.pageIndex, target.pageOffsetUnits, duration);
-                String noun = useWholeTextProgress() ? "document" : "page";
-                setPlaybackLabel("Seek " + noun + " to " + percent + "%: page " + (target.pageIndex + 1) + ", " + formatDuration(seekMs) + " / " + formatDuration(duration));
-                return;
-            } catch (Exception ignored) {
-            }
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        if (snapshot.prepared && snapshot.pageIndex == target.pageIndex && snapshot.durationMs > 0) {
+            int seekMs = msForPageOffsetUnits(target.pageIndex, target.pageOffsetUnits, snapshot.durationMs);
+            String noun = useWholeTextProgress() ? "document" : "page";
+            setPlaybackLabel("Seek " + noun + " to " + percent + "%: page " + (target.pageIndex + 1)
+                    + ", " + formatDuration(seekMs) + " / " + formatDuration(snapshot.durationMs));
+            return;
         }
         if (useWholeTextProgress()) {
-            setPlaybackLabel("Seek document to " + percent + "%: page " + (target.pageIndex + 1) + " (estimate until that page audio is ready)");
+            setPlaybackLabel("Seek document to " + percent + "%: page " + (target.pageIndex + 1)
+                    + " (estimate until that page audio is ready)");
         } else {
             setPlaybackLabel("Seek current page to " + percent + "% (estimate until audio is ready)");
         }
@@ -1084,40 +1020,62 @@ public class MainActivity extends Activity {
     }
 
     private void updatePlaybackProgress() {
-        if (playbackGenerationActive && !playbackPrepared) {
-            int pageIndex = activePlaybackPageIndex >= 0 ? activePlaybackPageIndex : currentPage;
-            long elapsed = Math.max(0L, System.currentTimeMillis() - estimatedPlaybackStartedAt);
-            int pageUnits = getPageProgressUnits(pageIndex);
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        applyPlaybackSnapshot(snapshot, false);
+        mainHandler.removeCallbacks(playbackProgressTicker);
+        if (snapshot.queueActive) {
+            mainHandler.postDelayed(playbackProgressTicker, snapshot.playing ? 500L : 1000L);
+        }
+    }
+
+    private void applyPlaybackSnapshot(PlaybackService.Snapshot snapshot, boolean announceStatus) {
+        if (snapshot == null) {
+            return;
+        }
+        if (snapshot.isActive() && activePlaybackDocumentId.isEmpty()
+                && snapshotMatchesCurrentDocument(snapshot)) {
+            activePlaybackDocumentId = snapshot.documentId;
+        }
+        if (!snapshot.documentId.isEmpty() && !activePlaybackDocumentId.isEmpty()
+                && !snapshot.documentId.equals(activePlaybackDocumentId)) {
+            return;
+        }
+
+        if (snapshot.pageIndex >= 0 && snapshot.pageIndex < pages.size() && currentPage != snapshot.pageIndex) {
+            currentPage = snapshot.pageIndex;
+            saveSession();
+            updatePageViews();
+        }
+
+        if (snapshot.generationActive && snapshot.pageIndex >= 0 && snapshot.pageIndex < pages.size()) {
+            long elapsed = Math.max(0L, System.currentTimeMillis() - snapshot.generationStartedAt);
+            int pageUnits = getPageProgressUnits(snapshot.pageIndex);
             int pageProgress;
             String detail;
-            if (estimatedBytesExpected > 0) {
-                pageProgress = (int) Math.max(0, Math.min(pageUnits - 1, (estimatedBytesRead * (long) pageUnits) / Math.max(1L, estimatedBytesExpected)));
-                detail = String.format(Locale.US, "Receiving Kokoro audio: %d%%", Math.max(0, Math.min(99, (estimatedBytesRead * 100L) / Math.max(1L, estimatedBytesExpected))));
-            } else if (estimatedBytesRead > 0) {
-                pageProgress = (int) Math.max(1, Math.min(pageUnits - 1, elapsed / 300));
-                detail = "Receiving Kokoro audio: " + formatBytes(estimatedBytesRead);
+            if (snapshot.bytesExpected > 0L) {
+                pageProgress = (int) Math.max(0L, Math.min(pageUnits - 1L,
+                        snapshot.bytesRead * (long) pageUnits / Math.max(1L, snapshot.bytesExpected)));
+                detail = String.format(Locale.US, "Receiving Kokoro audio: %d%%",
+                        Math.max(0L, Math.min(99L, snapshot.bytesRead * 100L / Math.max(1L, snapshot.bytesExpected))));
+            } else if (snapshot.bytesRead > 0L) {
+                pageProgress = (int) Math.max(1L, Math.min(pageUnits - 1L, elapsed / 300L));
+                detail = "Receiving Kokoro audio: " + formatBytes(snapshot.bytesRead);
             } else {
-                pageProgress = (int) Math.max(0, Math.min(pageUnits - 1, elapsed / 300));
+                pageProgress = (int) Math.max(0L, Math.min(pageUnits - 1L, elapsed / 300L));
                 detail = "Preparing audio...";
             }
-            int playbackProgress = getPlaybackBarProgressForPageOffsetUnits(pageIndex, pageProgress);
-            if (playbackSeek != null && !playbackSeekUserTouch && playbackSeek.getProgress() < playbackProgress) {
+            int playbackProgress = getPlaybackBarProgressForPageOffsetUnits(snapshot.pageIndex, pageProgress);
+            if (playbackSeek != null && !playbackSeekUserTouch) {
                 playbackSeek.setMax(getPlaybackBarMax());
                 playbackSeek.setProgress(playbackProgress);
             }
-            setPlaybackLabel(detail + " (" + getPlaybackScopeName() + " estimate; " + getTrackBuildStatusLabel() + ")");
-            mainHandler.postDelayed(playbackProgressTicker, 500);
-            return;
-        }
-        if (player == null || !playbackPrepared) {
-            updatePlayPauseButton();
-            return;
-        }
-        try {
-            int duration = player.getDuration();
-            int position = player.getCurrentPosition();
+            setPlaybackLabel(detail + " (background " + getPlaybackScopeName() + " estimate; "
+                    + getTrackBuildStatusLabel() + ")");
+        } else if (snapshot.prepared && snapshot.pageIndex >= 0 && snapshot.pageIndex < pages.size()) {
+            int duration = snapshot.durationMs;
+            int position = snapshot.positionMs;
             if (duration > 0) {
-                int playbackProgress = getPlaybackBarProgressForPagePosition(preparedPageIndex, position, duration);
+                int playbackProgress = getPlaybackBarProgressForPagePosition(snapshot.pageIndex, position, duration);
                 if (playbackSeek != null && !playbackSeekUserTouch) {
                     playbackSeek.setMax(getPlaybackBarMax());
                     playbackSeek.setProgress(playbackProgress);
@@ -1125,34 +1083,43 @@ public class MainActivity extends Activity {
                 int percent = Math.round((playbackProgress * 100f) / Math.max(1, getPlaybackBarMax()));
                 if (useWholeTextProgress()) {
                     String estimateSuffix = allPagesCached() ? "" : " est";
-                    setPlaybackLabel(String.format(Locale.US, "Document%s: %d%% • page %d/%d: %s / %s • %s", estimateSuffix, percent, preparedPageIndex + 1, pages.size(), formatDuration(position), formatDuration(duration), getTrackBuildStatusLabel()));
+                    setPlaybackLabel(String.format(Locale.US,
+                            "Document%s: %d%% • page %d/%d: %s / %s • background playback • %s",
+                            estimateSuffix, percent, snapshot.pageIndex + 1, pages.size(),
+                            formatDuration(position), formatDuration(duration), getTrackBuildStatusLabel()));
                 } else {
-                    setPlaybackLabel(String.format(Locale.US, "Page: %d%% • page %d/%d: %s / %s", percent, preparedPageIndex + 1, pages.size(), formatDuration(position), formatDuration(duration)));
+                    setPlaybackLabel(String.format(Locale.US,
+                            "Page: %d%% • page %d/%d: %s / %s • background playback",
+                            percent, snapshot.pageIndex + 1, pages.size(),
+                            formatDuration(position), formatDuration(duration)));
                 }
             } else {
-                playbackProgressIsEstimate = true;
-                int playbackProgress = Math.min(getPlaybackBarEndForPage(preparedPageIndex) - 1, Math.max(getPlaybackBarStartForPage(preparedPageIndex), playbackSeek == null ? 0 : playbackSeek.getProgress() + 5));
-                if (playbackSeek != null && !playbackSeekUserTouch) {
-                    playbackSeek.setMax(getPlaybackBarMax());
-                    playbackSeek.setProgress(playbackProgress);
-                }
-                setPlaybackLabel((useWholeTextProgress() ? "Document" : "Page") + " progress is estimated; current page duration unavailable yet.");
+                setPlaybackLabel(snapshot.status);
             }
-            updatePlayPauseButton();
-            mainHandler.postDelayed(playbackProgressTicker, player.isPlaying() ? 500 : 1000);
-        } catch (Exception ex) {
-            setPlaybackLabel("Playback: " + ex.getMessage());
+        } else if (!snapshot.status.isEmpty()) {
+            setPlaybackLabel(snapshot.status);
+        }
+
+        if (announceStatus && !snapshot.status.equals("Playback: idle")) {
+            setStatus(snapshot.status);
+        }
+        updatePlayPauseButton();
+    }
+
+    private boolean snapshotMatchesCurrentDocument(PlaybackService.Snapshot snapshot) {
+        if (snapshot == null || snapshot.documentId.isEmpty()) {
+            return false;
+        }
+        try {
+            PlaybackDocumentStore.Document document = PlaybackDocumentStore.read(this);
+            return snapshot.documentId.equals(document.id) && document.pages.equals(pages);
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
     private void resetPlaybackControls(String label) {
         stopProgressTicker();
-        playbackPrepared = false;
-        playbackProgressIsEstimate = false;
-        estimatedBytesRead = 0L;
-        estimatedBytesExpected = -1L;
-        preparedPageIndex = -1;
-        activePlaybackPageIndex = -1;
         clearPendingDocumentSeek();
         if (playbackSeek != null && !playbackSeekUserTouch) {
             playbackSeek.setMax(getPlaybackBarMax());
@@ -1172,16 +1139,11 @@ public class MainActivity extends Activity {
         if (playPauseButton == null) {
             return;
         }
-        if (player != null && playbackPrepared) {
-            try {
-                playPauseButton.setText(player.isPlaying() ? "Pause" : "Play");
-                playPauseButton.setEnabled(true);
-                return;
-            } catch (Exception ignored) {
-            }
-        }
-        playPauseButton.setText("Play");
-        playPauseButton.setEnabled(!playbackGenerationActive && !pages.isEmpty());
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        playPauseButton.setText(snapshot.playing ? "Pause" : "Play");
+        playPauseButton.setEnabled(!pages.isEmpty()
+                && !snapshot.generationActive
+                && (!snapshot.queueActive || snapshot.prepared));
     }
 
     private void setPlaybackVolumePercent(int percent) {
@@ -1207,13 +1169,7 @@ public class MainActivity extends Activity {
     }
 
     private void applyPlaybackVolume() {
-        if (player != null) {
-            try {
-                float volume = getPlaybackVolume();
-                player.setVolume(volume, volume);
-            } catch (Exception ignored) {
-            }
-        }
+        PlaybackService.setVolume(this, getPlaybackVolume());
     }
 
     private boolean useWholeTextProgress() {
@@ -1382,42 +1338,6 @@ public class MainActivity extends Activity {
         pendingSeekPageOffsetUnits = -1;
     }
 
-    private void clearPendingAutoAdvance() {
-        if (pendingAutoAdvanceRunnable != null) {
-            mainHandler.removeCallbacks(pendingAutoAdvanceRunnable);
-            pendingAutoAdvanceRunnable = null;
-        }
-    }
-
-    private void scheduleAutoAdvanceAfterCompletion(int completedPageIndex) {
-        clearPendingAutoAdvance();
-        final int nextPageIndex = completedPageIndex + 1;
-        if (nextPageIndex < 0 || nextPageIndex >= pages.size()) {
-            setStatus("Finished page " + (completedPageIndex + 1) + ".");
-            return;
-        }
-        int delayMs = getAutoNextDelayMs();
-        setStatus("Finished page " + (completedPageIndex + 1) + ". Starting page " + (nextPageIndex + 1) + (delayMs > 0 ? " after a short pause." : "."));
-        pendingAutoAdvanceRunnable = () -> {
-            pendingAutoAdvanceRunnable = null;
-            if (pages.isEmpty()) {
-                return;
-            }
-            if (completedPageIndex >= pages.size() - 1) {
-                return;
-            }
-            currentPage = nextPageIndex;
-            saveSession();
-            updatePageViews();
-            generateAndPlayCurrentPage();
-        };
-        if (delayMs > 0) {
-            mainHandler.postDelayed(pendingAutoAdvanceRunnable, delayMs);
-        } else {
-            mainHandler.post(pendingAutoAdvanceRunnable);
-        }
-    }
-
     private String formatDuration(int ms) {
         int totalSeconds = Math.max(0, ms / 1000);
         int minutes = totalSeconds / 60;
@@ -1436,103 +1356,10 @@ public class MainActivity extends Activity {
         return String.format(Locale.US, "%.1f MiB", kib / 1024.0);
     }
 
-    private void playAudio(File file, int pageIndex) {
-        try {
-            int savedPendingSeekPageIndex = pendingSeekPageIndex;
-            int savedPendingSeekPageOffsetUnits = pendingSeekPageOffsetUnits;
-            releasePlayer();
-            pendingSeekPageIndex = savedPendingSeekPageIndex;
-            pendingSeekPageOffsetUnits = savedPendingSeekPageOffsetUnits;
-            player = new MediaPlayer();
-            if (android.os.Build.VERSION.SDK_INT >= 21) {
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build();
-                player.setAudioAttributes(attrs);
-            }
-            player.setDataSource(file.getAbsolutePath());
-            player.setOnPreparedListener(mp -> {
-                playbackPrepared = true;
-                playbackGenerationActive = false;
-                playbackProgressIsEstimate = false;
-                preparedPageIndex = pageIndex;
-                activePlaybackPageIndex = pageIndex;
-                applyPlaybackRate(mp);
-                applyPlaybackVolume();
-                if (pendingSeekPageIndex == pageIndex && pendingSeekPageOffsetUnits >= 0) {
-                    try {
-                        int targetMs = msForPageOffsetUnits(pageIndex, pendingSeekPageOffsetUnits, mp.getDuration());
-                        mp.seekTo(targetMs);
-                    } catch (Exception ignored) {
-                    }
-                    clearPendingDocumentSeek();
-                }
-                mp.start();
-                updatePlayPauseButton();
-                updatePlaybackProgress();
-                setStatus("Playing page " + (pageIndex + 1) + " of " + pages.size() + " with " + getPlaybackScopeName() + " progress.");
-                ensurePrefetchAhead(pageIndex, false);
-            });
-            player.setOnCompletionListener(mp -> {
-                updatePlayPauseButton();
-                try {
-                    int duration = mp.getDuration();
-                    if (playbackSeek != null && duration > 0 && !playbackSeekUserTouch) {
-                        playbackSeek.setMax(getPlaybackBarMax());
-                        playbackSeek.setProgress(getPlaybackBarEndForPage(pageIndex));
-                    }
-                    setPlaybackLabel("Finished page " + (pageIndex + 1) + ": " + formatDuration(duration));
-                } catch (Exception ignored) {
-                    setPlaybackLabel("Finished page " + (pageIndex + 1) + ".");
-                }
-                if (prefBool("autoNext", true) && pageIndex + 1 < pages.size()) {
-                    scheduleAutoAdvanceAfterCompletion(pageIndex);
-                } else {
-                    setStatus("Finished page " + (pageIndex + 1) + ".");
-                }
-            });
-            player.setOnErrorListener((mp, what, extra) -> {
-                resetPlaybackControls("Playback error");
-                setStatus("Playback error: what=" + what + " extra=" + extra + ". Try mp3 response format if another format fails.");
-                return true;
-            });
-            player.prepareAsync();
-        } catch (Exception ex) {
-            setStatus("Could not play audio: " + ex.getMessage());
-        }
-    }
-
-    private void applyPlaybackRate(MediaPlayer mp) {
-        if (android.os.Build.VERSION.SDK_INT >= 23) {
-            try {
-                mp.setPlaybackParams(mp.getPlaybackParams().setSpeed(getPlaybackRate()));
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
     private void releasePlayer() {
+        PlaybackService.stop(this);
         stopProgressTicker();
-        clearPendingAutoAdvance();
-        if (player != null) {
-            try {
-                player.stop();
-            } catch (Exception ignored) {
-            }
-            try {
-                player.release();
-            } catch (Exception ignored) {
-            }
-            player = null;
-        }
-        playbackPrepared = false;
-        playbackGenerationActive = false;
-        playbackProgressIsEstimate = false;
-        estimatedBytesRead = 0L;
-        estimatedBytesExpected = -1L;
-        preparedPageIndex = -1;
-        activePlaybackPageIndex = -1;
+        activePlaybackDocumentId = "";
         resetPlaybackControls("Playback: idle");
     }
 
@@ -1655,6 +1482,31 @@ public class MainActivity extends Activity {
             return;
         }
         int savedPage = prefs.getInt("lastPage", 0);
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        String normalized = normalizeCopiedText(text);
+        ArrayList<String> restoredPages = splitIntoPages(normalized, getMaxChars());
+        if (!autoPlay && snapshot.isActive()) {
+            try {
+                PlaybackDocumentStore.Document document = PlaybackDocumentStore.read(this);
+                if (snapshot.documentId.equals(document.id) && document.pages.equals(restoredPages)) {
+                    fullText = normalized;
+                    pages.clear();
+                    pages.addAll(restoredPages);
+                    rebuildPlaybackProgressIndex();
+                    ensureCurrentHistorySession();
+                    activePlaybackDocumentId = snapshot.documentId;
+                    currentPage = snapshot.pageIndex >= 0 ? snapshot.pageIndex : savedPage;
+                    currentPage = Math.max(0, Math.min(currentPage, Math.max(0, pages.size() - 1)));
+                    updatePageViews();
+                    setStatus("Restored the active background playback session.");
+                    applyPlaybackSnapshot(snapshot, false);
+                    startProgressTicker();
+                    return;
+                }
+            } catch (Exception ignored) {
+                // Fall through to ordinary session restoration.
+            }
+        }
         setFullTextAndPaginate(text, savedPage, autoPlay, "Loaded saved session.");
     }
 
@@ -2066,7 +1918,7 @@ public class MainActivity extends Activity {
                 have++;
             }
         }
-        boolean fetching = getActiveGenerationCount() > 0 || playbackGenerationActive;
+        boolean fetching = getActiveGenerationCount() > 0 || PlaybackService.getSnapshot().generationActive;
         if (have >= pages.size()) {
             return "Track: complete/offline";
         }
@@ -2110,6 +1962,9 @@ public class MainActivity extends Activity {
     }
 
     private void ensurePrefetchAhead(int fromPageIndex, boolean announce) {
+        if (PlaybackService.getSnapshot().isActive()) {
+            return;
+        }
         if (pages.isEmpty()) {
             return;
         }
@@ -2502,7 +2357,7 @@ public class MainActivity extends Activity {
                 ensurePrefetchAhead(currentPage, false);
                 if (playbackSeek != null && !playbackSeekUserTouch) {
                     playbackSeek.setMax(getPlaybackBarMax());
-                    if (player == null || !playbackPrepared) {
+                    if (!PlaybackService.getSnapshot().prepared) {
                         playbackSeek.setProgress(getPlaybackBarStartForPage(currentPage));
                     }
                 }
