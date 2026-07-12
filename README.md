@@ -59,7 +59,7 @@ The Settings dialog includes:
 - **Fetch Voices** from `/v1/audio/voices`
 - TTS speed sent to Kokoro
 - local phone playback rate
-- response format: `mp3`, `opus`, `aac`, `flac`, `wav`, or `pcm`
+- response format: `mp3`, `opus`, `aac`, `flac`, or `wav`
 - stream flag
 - language code override, blank means auto
 - page/chunk size
@@ -72,7 +72,7 @@ The Settings dialog includes:
 - max speech-history sessions to keep
 - prefetch pages-ahead count
 - dark / light mode, defaulting to dark
-- build information: app version, build type, build date, Git SHA, Git commit date, branch, describe string, and clean/dirty tree state
+- build information: app version, build type, Git SHA, Git commit date, branch, describe string, and clean/dirty tree state
 
 For best Android playback compatibility, start with `mp3`.
 
@@ -158,7 +158,7 @@ From this project directory:
 ./build_debug.sh
 ```
 
-The script uses your installed `gradle` if available. If Gradle is not installed, it downloads Gradle 8.10.2 into `.gradle-local/` and uses that.
+The script uses your installed `gradle` if available. If Gradle is not installed, it downloads Gradle 8.10.2 into `.gradle-local/`, verifies the published SHA-256 checksum and ZIP integrity, and uses that copy.
 
 The launcher icon is sourced from `icon.png` in the project root. Keep that file next to `settings.gradle`. The Gradle build generates density-specific launcher PNGs and Android adaptive-icon XML before packaging the APK. If the root PNG is an RGB image with a white background, the generator flood-fills only the border-connected near-white background to transparency, so Android launchers do not show the icon as a white square.
 
@@ -167,6 +167,22 @@ The debug APK will be here:
 ```bash
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## Test before installing
+
+Run the deterministic JVM, Robolectric, storage, and fake-Kokoro integration suite:
+
+```bash
+./test_debug.sh
+```
+
+With an emulator or authorized test device connected, run the Android lifecycle test that uses real foreground playback and recreates the activity while a two-page WAV queue is playing:
+
+```bash
+KOKORO_ALLOW_DESTRUCTIVE_CONNECTED_TESTS=1 ./connected_test.sh
+```
+
+See [`docs/TESTING.md`](docs/TESTING.md) for the coverage boundary and report locations. The fast suite does not install an APK; the connected suite installs test artifacts only on the selected emulator/device.
 
 ### Local server config
 
@@ -185,7 +201,7 @@ Gradle injects that value into `BuildConfig.DEFAULT_SERVER_BASE` when building t
 
 ### Build metadata
 
-Settings shows a **Build information** section with app version, build type, UTC build date, Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Gradle reads these from the local Git checkout when available. If you build from a source archive without `.git`, the Git fields fall back to `unknown`.
+Settings shows a **Build information** section with app version, build type, Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Gradle reads these from the local Git checkout when available. If you build from a source archive without `.git`, the Git fields fall back to `unknown`. No wall-clock build timestamp is embedded, so identical source inputs remain reproducible.
 
 ## Install on Pixel 5
 
@@ -205,9 +221,18 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 This app intentionally allows cleartext HTTP because it is meant for a private VPN/LAN Kokoro server. Do not ship this configuration as-is for a public internet service.
 
+## Background playback and media controls
+
+A foreground `PlaybackService` owns the active document, Kokoro generation, page prefetch, `MediaPlayer`, audio focus, and auto-advance. Playback therefore continues across rotation, screen-off, Home, and app switching. The notification and Android media session expose play/pause, next, stop, lock-screen, headset, and Bluetooth controls. Disconnecting a wired or Bluetooth audio route pauses playback instead of unexpectedly switching to the phone speaker.
+
+Each playback run captures an immutable TTS configuration. Changing Settings while a document is active affects the next run rather than mixing voices, formats, servers, or normalization policies inside one queue. Pressing Stop cancels queued work and disconnects active Kokoro requests. The service is deliberately non-sticky: Android process death never causes unsolicited speech to restart later.
+
+## Privacy and storage
+
+Document text, generated audio, and history metadata live in app-private storage. The saved editor document uses an atomic file rather than a large `SharedPreferences` value, and legacy preference state is migrated automatically. Android cloud/device backup is disabled for the app so that private reading material is not copied into backups by default. Metadata and audio promotion use atomic file replacement to avoid accepting partial files after interruption.
+
 ## Current limitations
 
-- No lock-screen media controls yet.
-- No foreground media service yet.
 - No sentence/word timestamp seeking yet.
+- Playback does not automatically resume after Android kills the app process; this is intentional to prevent unexpected speech. Reopen the app and start the saved session explicitly.
 - The main text box auto-paginates user-initiated paste. If you manually edit an already paginated page, tapping **Play text** treats the edited visible text as a new document.

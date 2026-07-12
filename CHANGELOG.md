@@ -2,13 +2,32 @@
 
 ## Unreleased
 
+- Added a pre-install JVM/Robolectric test suite for pagination, immutable TTS configuration, atomic storage, playback-document replacement, service restart semantics, and playback policy decisions.
+- Added loopback Kokoro integration tests for successful publication, cache reuse, concurrent request deduplication, active cancellation, truncated responses, and invalid cached audio.
+- Added a connected Android lifecycle test that serves valid WAV audio locally, recreates the activity during playback, and verifies service-owned auto-advance to the second page.
+- Added reusable test/build scripts and GitHub Actions coverage so tests run consistently outside Android Studio.
+- Extracted pure text pagination and playback policy decisions from Android lifecycle code so correctness is directly testable.
 - Moved speech generation, page auto-advance, prefetch, and `MediaPlayer` ownership into a foreground playback service.
-- Playback now survives rotation, screen-off, Home, and switching to another app.
-- Added a persistent playback notification with play/pause and stop controls.
-- Added audio-focus handling, wake-lock ownership, and durable active-document handoff between the activity and service.
-- Added Android 13+ notification permission handling and media-playback foreground-service declarations.
-- Fixed document replacement and stop/start races around rapid playback commands.
-- Added Settings build information with app version, build type, UTC build date, Git SHA, commit date, branch, describe string, clean/dirty tree state, and a copy button.
+- Playback now survives activity recreation, rotation, screen-off, Home, and switching to another app.
+- Added Android media-session integration with notification, lock-screen, headset, Bluetooth, play/pause, next, and stop controls.
+- Added complete audio-focus handling, delayed-focus start, noisy-route pausing, and wake-lock ownership.
+- Made the playback service non-sticky so process death cannot resurrect stale speech unexpectedly.
+- Added explicit playback-run cancellation that stops queued work, disconnects in-flight HTTP requests, and rejects stale results.
+- Captured an immutable TTS configuration per document so settings cannot change voice, server, format, or normalization halfway through a queue.
+- Consolidated foreground generation, manual pre-generation, prefetch, cache lookup, history lookup, and in-flight deduplication in one shared audio repository.
+- Added atomic document/history writes and atomic audio promotion to prevent partial or concurrently overwritten files.
+- Moved the saved editor document out of `SharedPreferences` into an atomic app-private file, with one-time migration of legacy state.
+- Serialized Clear History and Clear Audio Cache with request cancellation so late downloads cannot recreate data after deletion.
+- Kept a bounded wake lock across the auto-next gap so screen-off playback cannot sleep between pages, while stopping the progress ticker when paused.
+- Kept activity/history state pinned to the active document across settings changes and deferred page-size repagination until the next explicit playback run.
+- Rejected incomplete fixed-length HTTP responses before cache promotion and suppressed stale utility-network callbacks after activity destruction.
+- Coalesced routine history metadata saves so page scrubbing/navigation no longer rewrites and fsyncs the full session JSON for every intermediate UI event.
+- Removed raw PCM from selectable formats because Android `MediaPlayer` cannot play headerless PCM directly.
+- Removed activity `configChanges` interception so normal Android recreation paths are exercised while playback remains service-owned.
+- Disabled Android backup for private document text and generated speech.
+- Added a dedicated monochrome notification icon and Android 13+ notification-permission handling.
+- Removed the wall-clock build timestamp for reproducible builds and added checksum/integrity verification to the Gradle fallback downloader.
+- Added Settings build information with app version, build type, Git SHA, commit date, branch, describe string, clean/dirty tree state, and a copy button.
 
 ## 0.6.0
 
