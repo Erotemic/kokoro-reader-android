@@ -34,15 +34,11 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
@@ -86,12 +82,15 @@ public class MainActivity extends Activity {
     private final HashSet<String> activeAudioGenerations = new HashSet<>();
     private final ArrayList<Integer> pageStartUnits = new ArrayList<>();
     private String fullText = "";
+    private String lastStoredText;
     private int currentPage = 0;
     private int totalPlaybackUnits = 1;
     private boolean programmaticTextUpdate = false;
+    private boolean repaginateBeforeNextPlayback = false;
 
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable historyPersistRunnable = this::persistCurrentHistoryMetadata;
     private SharedPreferences prefs;
 
     private boolean playbackSeekUserTouch = false;
@@ -100,6 +99,13 @@ public class MainActivity extends Activity {
     private String currentSessionId = "";
     private long currentSessionCreatedAt = 0L;
     private String activePlaybackDocumentId = "";
+    private TtsConfig activePlaybackTtsConfig;
+    private KokoroAudioRepository.Cancellation activityGenerationScope =
+            new KokoroAudioRepository.Cancellation();
+    private final KokoroAudioRepository.Cancellation activityUtilityNetworkScope =
+            new KokoroAudioRepository.Cancellation();
+    private volatile boolean destroyed;
+    private boolean activityStarted;
     private boolean playbackReceiverRegistered = false;
     private final BroadcastReceiver playbackStateReceiver = new BroadcastReceiver() {
         @Override
@@ -168,6 +174,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        activityStarted = true;
         IntentFilter filter = new IntentFilter(PlaybackService.ACTION_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(playbackStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -176,6 +183,7 @@ public class MainActivity extends Activity {
         }
         playbackReceiverRegistered = true;
         PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        updatePageViews();
         applyPlaybackSnapshot(snapshot, true);
         if (snapshot.queueActive) {
             startProgressTicker();
@@ -190,6 +198,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        activityStarted = false;
         if (playbackReceiverRegistered) {
             unregisterReceiver(playbackStateReceiver);
             playbackReceiverRegistered = false;
@@ -199,7 +208,11 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        destroyed = true;
         stopProgressTicker();
+        cancelScheduledHistoryPersist();
+        cancelActivityGenerationWork(false);
+        activityUtilityNetworkScope.cancel();
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -485,11 +498,35 @@ public class MainActivity extends Activity {
             needsPagination = !visible.trim().equals(pages.get(currentPage).trim());
         }
         if (needsPagination) {
+            repaginateBeforeNextPlayback = false;
             paginateTextBox(true);
             return;
         }
+        if (repaginateBeforeNextPlayback && fullText != null && !fullText.trim().isEmpty()) {
+            repaginateForCurrentSettings();
+        }
         clearPendingDocumentSeek();
         generateAndPlayCurrentPage();
+    }
+
+    private void repaginateForCurrentSettings() {
+        int oldStartUnits = getPageStartUnit(Math.max(0, Math.min(currentPage, Math.max(0, pages.size() - 1))));
+        int oldTotalUnits = Math.max(1, totalPlaybackUnits);
+        double progressFraction = oldStartUnits / (double) oldTotalUnits;
+        pages.clear();
+        pages.addAll(splitIntoPages(fullText, getMaxChars()));
+        rebuildPlaybackProgressIndex();
+        int targetUnits = (int) Math.round(progressFraction * totalPlaybackUnits);
+        currentPage = 0;
+        for (int index = 0; index < pages.size(); index++) {
+            if (getPageStartUnit(index) <= targetUnits) {
+                currentPage = index;
+            } else {
+                break;
+            }
+        }
+        repaginateBeforeNextPlayback = false;
+        updatePageViews();
     }
 
     private void showClearTextDialog() {
@@ -522,18 +559,24 @@ public class MainActivity extends Activity {
     }
 
     private void clearHistoryStorage() {
-        int count = deleteChildren(getHistoryRootDir());
-        //noinspection ResultOfMethodCallIgnored
-        getHistoryRootDir().delete();
+        cancelScheduledHistoryPersist();
+        cancelActivityGenerationWork(true);
+        PlaybackService.clearHistory(this);
+        stopProgressTicker();
+        activePlaybackDocumentId = "";
+        activePlaybackTtsConfig = null;
         currentSessionId = "";
         currentSessionCreatedAt = 0L;
         updatePageViews();
-        setStatus("Cleared speech history storage (" + count + " file/folder entries removed). Current text is kept.");
+        setStatus("Clearing speech history storage. Current text is kept.");
     }
 
     private void clearCurrentTextSession(String status) {
+        cancelScheduledHistoryPersist();
+        cancelActivityGenerationWork(true);
         releasePlayer();
         fullText = "";
+        repaginateBeforeNextPlayback = false;
         pages.clear();
         pageStartUnits.clear();
         totalPlaybackUnits = 1;
@@ -546,8 +589,10 @@ public class MainActivity extends Activity {
             textEdit.setText("");
             programmaticTextUpdate = false;
         }
+        CurrentTextStore.clear(this);
+        lastStoredText = "";
         prefs.edit()
-                .putString("lastText", "")
+                .remove("lastText")
                 .putInt("lastPage", 0)
                 .apply();
         updatePageViews();
@@ -577,11 +622,13 @@ public class MainActivity extends Activity {
     }
 
     private void setFullTextAndPaginate(String raw, int desiredPage, boolean autoPlay, String prefix) {
+        cancelActivityGenerationWork(true);
         if (!autoPlay) {
             releasePlayer();
         }
         String normalized = normalizeCopiedText(raw);
         fullText = normalized;
+        repaginateBeforeNextPlayback = false;
         pages.clear();
         pages.addAll(splitIntoPages(normalized, getMaxChars()));
         rebuildPlaybackProgressIndex();
@@ -603,117 +650,11 @@ public class MainActivity extends Activity {
     }
 
     private String normalizeCopiedText(String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String text = raw.replace("\r\n", "\n").replace('\r', '\n');
-        text = text.replace((char) 160, ' ');
-        text = text.replace('\t', ' ');
-        text = text.replace('\f', ' ');
-        text = text.replace((char) 11, ' ');
-        text = text.replaceAll("(?m)-\\n(?=\\p{Ll})", "");
-        text = text.trim();
-        if (text.isEmpty()) {
-            return "";
-        }
-
-        String[] paragraphs = text.split("\\n\\s*\\n+");
-        StringBuilder out = new StringBuilder();
-        for (String paragraph : paragraphs) {
-            String p = paragraph.replaceAll("\\s*\\n\\s*", " ").replaceAll(" {2,}", " ").trim();
-            if (!p.isEmpty()) {
-                if (out.length() > 0) {
-                    out.append("\n\n");
-                }
-                out.append(p);
-            }
-        }
-        return out.toString();
+        return TextPaginator.normalizeCopiedText(raw);
     }
 
     private ArrayList<String> splitIntoPages(String text, int maxChars) {
-        ArrayList<String> result = new ArrayList<>();
-        if (text == null || text.trim().isEmpty()) {
-            return result;
-        }
-        String[] paragraphs = text.split("\\n\\n+");
-        StringBuilder current = new StringBuilder();
-        for (String paragraph : paragraphs) {
-            String p = paragraph.trim();
-            if (p.isEmpty()) {
-                continue;
-            }
-            if (p.length() > maxChars) {
-                flushPage(result, current);
-                result.addAll(splitLongParagraph(p, maxChars));
-            } else if (current.length() > 0 && current.length() + p.length() + 2 > maxChars) {
-                flushPage(result, current);
-                current.append(p);
-            } else {
-                if (current.length() > 0) {
-                    current.append("\n\n");
-                }
-                current.append(p);
-            }
-        }
-        flushPage(result, current);
-        return result;
-    }
-
-    private void flushPage(ArrayList<String> result, StringBuilder current) {
-        String page = current.toString().trim();
-        if (!page.isEmpty()) {
-            result.add(page);
-        }
-        current.setLength(0);
-    }
-
-    private ArrayList<String> splitLongParagraph(String paragraph, int maxChars) {
-        ArrayList<String> result = new ArrayList<>();
-        String[] sentences = paragraph.split("(?<=[.!?])\\s+");
-        StringBuilder current = new StringBuilder();
-        for (String sentence : sentences) {
-            String s = sentence.trim();
-            if (s.isEmpty()) {
-                continue;
-            }
-            if (s.length() > maxChars) {
-                flushPage(result, current);
-                hardSplit(result, s, maxChars);
-            } else if (current.length() > 0 && current.length() + s.length() + 1 > maxChars) {
-                flushPage(result, current);
-                current.append(s);
-            } else {
-                if (current.length() > 0) {
-                    current.append(' ');
-                }
-                current.append(s);
-            }
-        }
-        flushPage(result, current);
-        return result;
-    }
-
-    private void hardSplit(ArrayList<String> result, String text, int maxChars) {
-        int start = 0;
-        int length = text.length();
-        while (start < length) {
-            int end = Math.min(start + maxChars, length);
-            if (end < length) {
-                int space = text.lastIndexOf(' ', end);
-                if (space > start + maxChars / 2) {
-                    end = space;
-                }
-            }
-            String piece = text.substring(start, end).trim();
-            if (!piece.isEmpty()) {
-                result.add(piece);
-            }
-            start = Math.max(end, start + 1);
-            while (start < length && Character.isWhitespace(text.charAt(start))) {
-                start++;
-            }
-        }
+        return TextPaginator.splitIntoPages(text, maxChars);
     }
 
     private void movePage(int delta) {
@@ -740,11 +681,13 @@ public class MainActivity extends Activity {
                 return;
             }
         }
+        ensureCurrentHistorySession();
         saveSession();
         try {
             PlaybackDocumentStore.Document document = PlaybackDocumentStore.write(
-                    this, pages, currentSessionId, currentPage);
+                    this, pages, currentSessionId, currentPage, getTtsConfig());
             activePlaybackDocumentId = document.id;
+            activePlaybackTtsConfig = document.ttsConfig;
             setEstimatedPlaybackProgress(currentPage, "Preparing page " + (currentPage + 1) + " in background");
             setStatus("Starting background playback for page " + (currentPage + 1) + " of " + pages.size() + "...");
             ensurePlaybackNotificationPermission();
@@ -757,7 +700,7 @@ public class MainActivity extends Activity {
     }
 
     private void pregenerateNextPages(int count, boolean announce) {
-        if (PlaybackService.getSnapshot().isActive()) {
+        if (hasActiveOrPendingPlayback()) {
             setStatus("Background playback already owns prefetching for the active document.");
             return;
         }
@@ -768,9 +711,13 @@ public class MainActivity extends Activity {
         if (pages.isEmpty() || count <= 0) {
             return;
         }
-        final int start = Math.max(0, Math.min(startPageIndex, pages.size()));
-        final int end = Math.min(pages.size(), start + count);
+        final ArrayList<String> requestedPages = new ArrayList<>(pages);
+        final int start = Math.max(0, Math.min(startPageIndex, requestedPages.size()));
+        final int end = Math.min(requestedPages.size(), start + count);
         final String sessionId = currentSessionId;
+        final TtsConfig config = getTtsConfig();
+        final int historyLimit = getHistoryLimit();
+        final KokoroAudioRepository.Cancellation generationScope = activityGenerationScope;
         if (start >= end) {
             return;
         }
@@ -780,21 +727,29 @@ public class MainActivity extends Activity {
         executor.submit(() -> {
             int generated = 0;
             for (int i = start; i < end; i++) {
+                String pageText = requestedPages.get(i);
                 try {
-                    if (!audioAvailableForPage(i, pages.get(i))) {
-                        requestSpeech(pages.get(i), i, sessionId);
+                    if (KokoroAudioRepository.findPlayable(
+                            this, config, historyLimit, sessionId, i, pageText) == null) {
+                        requestSpeech(pageText, i, sessionId, config, historyLimit, generationScope);
                         generated++;
                     }
+                } catch (InterruptedException ignored) {
+                    return;
                 } catch (Exception ex) {
-                    if (announce) {
+                    if (announce && !generationScope.isCancelled()) {
                         final int failedPage = i + 1;
-                        mainHandler.post(() -> setStatus("Pre-generation failed on page " + failedPage + ": " + ex.getMessage()));
+                        postIfActivityAlive(() -> setStatus(
+                                "Pre-generation failed on page " + failedPage + ": " + ex.getMessage()));
                     }
                     return;
                 }
             }
+            if (generationScope.isCancelled()) {
+                return;
+            }
             final int finalGenerated = generated;
-            mainHandler.post(() -> {
+            postIfActivityAlive(() -> {
                 updatePageViews();
                 if (announce) {
                     setStatus("Pre-generation done. New pages generated: " + finalGenerated + ".");
@@ -803,113 +758,30 @@ public class MainActivity extends Activity {
         });
     }
 
-    private File requestSpeech(String text, int pageIndex, String sessionId) throws Exception {
-        File cached = audioFileFor(pageIndex, text);
-        File existing = findPlayableAudioFile(sessionId, pageIndex, text);
-        if (existing != null && existing.exists() && existing.length() > 0) {
-            return existing;
-        }
+    private File requestSpeech(
+            String text,
+            int pageIndex,
+            String sessionId,
+            TtsConfig config,
+            int historyLimit,
+            KokoroAudioRepository.Cancellation generationScope) throws Exception {
+        File cached = KokoroAudioRepository.cacheFile(this, config, pageIndex, text);
         String generationKey = cached.getAbsolutePath();
-        if (!markAudioGenerationStarted(generationKey)) {
-            File waited = waitForGeneratedAudio(sessionId, pageIndex, text, 180000L);
-            if (waited != null) {
-                return waited;
-            }
-            throw new IllegalStateException("Timed out waiting for another generation of page " + (pageIndex + 1) + ".");
-        }
+        boolean generationMarkerOwner = markAudioGenerationStarted(generationKey);
         try {
-            File dir = cached.getParentFile();
-            if (dir != null && !dir.exists() && !dir.mkdirs()) {
-                throw new IllegalStateException("Could not create cache directory: " + dir.getAbsolutePath());
-            }
-
-            URL url = new URL(getServerBase() + "/v1/audio/speech");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(180000);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setRequestProperty("Accept", acceptHeaderForFormat(getResponseFormat()));
-
-            JSONObject payload = new JSONObject();
-            payload.put("model", getModel());
-            payload.put("input", text);
-            payload.put("voice", getVoice());
-            payload.put("response_format", getResponseFormat());
-            payload.put("speed", getTtsSpeed());
-            payload.put("stream", prefBool("stream", true));
-            String lang = getLangCode();
-            if (!lang.isEmpty()) {
-                payload.put("lang_code", lang);
-            }
-            JSONObject normalization = new JSONObject();
-            normalization.put("normalize", prefBool("normalize", true));
-            normalization.put("unit_normalization", prefBool("unitNorm", false));
-            normalization.put("url_normalization", prefBool("urlNorm", true));
-            normalization.put("email_normalization", prefBool("emailNorm", true));
-            normalization.put("optional_pluralization_normalization", prefBool("pluralNorm", true));
-            normalization.put("phone_normalization", prefBool("phoneNorm", true));
-            payload.put("normalization_options", normalization);
-
-            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(body.length);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body);
-            }
-
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                String error = readError(conn);
-                throw new IllegalStateException("HTTP " + code + " from Kokoro: " + error);
-            }
-
-            File tmp = new File(cached.getAbsolutePath() + ".tmp");
-            try (InputStream is = new BufferedInputStream(conn.getInputStream());
-                 FileOutputStream fos = new FileOutputStream(tmp)) {
-                byte[] buffer = new byte[8192];
-                int n;
-                while ((n = is.read(buffer)) != -1) {
-                    fos.write(buffer, 0, n);
-                }
-            } finally {
-                conn.disconnect();
-            }
-
-            if (tmp.length() == 0) {
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
-                throw new IllegalStateException("Kokoro returned an empty audio file.");
-            }
-            if (cached.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                cached.delete();
-            }
-            if (!tmp.renameTo(cached)) {
-                throw new IllegalStateException("Could not move generated audio into cache.");
-            }
-            persistGeneratedAudio(sessionId, pageIndex, text, cached);
-            return cached;
+            return KokoroAudioRepository.requestSpeech(
+                    this,
+                    config,
+                    historyLimit,
+                    sessionId,
+                    pageIndex,
+                    text,
+                    generationScope,
+                    null);
         } finally {
-            markAudioGenerationFinished(generationKey);
-        }
-    }
-
-    private String acceptHeaderForFormat(String format) {
-        switch (format) {
-            case "wav":
-                return "audio/wav, audio/*, application/octet-stream";
-            case "aac":
-                return "audio/aac, audio/*, application/octet-stream";
-            case "flac":
-                return "audio/flac, audio/*, application/octet-stream";
-            case "opus":
-                return "audio/opus, audio/*, application/octet-stream";
-            case "pcm":
-                return "audio/pcm, audio/*, application/octet-stream";
-            case "mp3":
-            default:
-                return "audio/mpeg, audio/*, application/octet-stream";
+            if (generationMarkerOwner) {
+                markAudioGenerationFinished(generationKey);
+            }
         }
     }
 
@@ -964,6 +836,11 @@ public class MainActivity extends Activity {
             return;
         }
         DocumentSeekTarget target = playbackSeekTargetForProgress(progress);
+        PlaybackService.Snapshot activeSnapshot = PlaybackService.getSnapshot();
+        if (!hasActiveOrPendingPlayback()) {
+            ensureCurrentHistorySession();
+        }
+        TtsConfig seekConfig = getEffectiveTtsConfig();
         currentPage = target.pageIndex;
         pendingSeekPageIndex = target.pageIndex;
         pendingSeekPageOffsetUnits = target.pageOffsetUnits;
@@ -971,8 +848,9 @@ public class MainActivity extends Activity {
         updatePageViews();
         try {
             PlaybackDocumentStore.Document document = PlaybackDocumentStore.write(
-                    this, pages, currentSessionId, currentPage);
+                    this, pages, currentSessionId, currentPage, seekConfig);
             activePlaybackDocumentId = document.id;
+            activePlaybackTtsConfig = document.ttsConfig;
             ensurePlaybackNotificationPermission();
             PlaybackService.seek(this, target.pageIndex, target.pageOffsetUnits);
             setStatus((useWholeTextProgress() ? "Seeking whole text to page " : "Seeking current page ")
@@ -1031,6 +909,11 @@ public class MainActivity extends Activity {
     private void applyPlaybackSnapshot(PlaybackService.Snapshot snapshot, boolean announceStatus) {
         if (snapshot == null) {
             return;
+        }
+        if (!snapshot.isActive() && snapshot.documentId.isEmpty()
+                && !storedPlaybackDocumentMatchesActiveId()) {
+            activePlaybackDocumentId = "";
+            activePlaybackTtsConfig = null;
         }
         if (snapshot.isActive() && activePlaybackDocumentId.isEmpty()
                 && snapshotMatchesCurrentDocument(snapshot)) {
@@ -1112,7 +995,11 @@ public class MainActivity extends Activity {
         }
         try {
             PlaybackDocumentStore.Document document = PlaybackDocumentStore.read(this);
-            return snapshot.documentId.equals(document.id) && document.pages.equals(pages);
+            boolean matches = snapshot.documentId.equals(document.id) && document.pages.equals(pages);
+            if (matches) {
+                activePlaybackTtsConfig = document.ttsConfig;
+            }
+            return matches;
         } catch (Exception ignored) {
             return false;
         }
@@ -1190,10 +1077,6 @@ public class MainActivity extends Activity {
 
     private int getPlaybackBarStartForPage(int pageIndex) {
         return useWholeTextProgress() ? getPageStartUnit(pageIndex) : 0;
-    }
-
-    private int getPlaybackBarEndForPage(int pageIndex) {
-        return useWholeTextProgress() ? getPageEndUnit(pageIndex) : PAGE_PROGRESS_MAX;
     }
 
     private int getPlaybackBarProgressForPageOffsetUnits(int pageIndex, int pageOffsetUnits) {
@@ -1302,16 +1185,6 @@ public class MainActivity extends Activity {
         return getPageStartUnit(pageIndex + 1);
     }
 
-    private int getWholePlaybackProgressForPagePosition(int pageIndex, int positionMs, int durationMs) {
-        int start = getPageStartUnit(pageIndex);
-        int units = getPageProgressUnits(pageIndex);
-        if (durationMs <= 0) {
-            return clampWholePlaybackProgress(start);
-        }
-        int offset = (int) Math.max(0, Math.min(units, (positionMs * (long) units) / Math.max(1, durationMs)));
-        return clampWholePlaybackProgress(start + offset);
-    }
-
     private int msForPageOffsetUnits(int pageIndex, int offsetUnits, int durationMs) {
         if (durationMs <= 0) {
             return 0;
@@ -1356,10 +1229,18 @@ public class MainActivity extends Activity {
         return String.format(Locale.US, "%.1f MiB", kib / 1024.0);
     }
 
+    private void cancelActivityGenerationWork(boolean resetForFutureWork) {
+        activityGenerationScope.cancel();
+        if (resetForFutureWork) {
+            activityGenerationScope = new KokoroAudioRepository.Cancellation();
+        }
+    }
+
     private void releasePlayer() {
         PlaybackService.stop(this);
         stopProgressTicker();
         activePlaybackDocumentId = "";
+        activePlaybackTtsConfig = null;
         resetPlaybackControls("Playback: idle");
     }
 
@@ -1367,9 +1248,11 @@ public class MainActivity extends Activity {
         if (textEdit == null || pageLabel == null || pageSeek == null) {
             return;
         }
+        TtsConfig displayConfig = getEffectiveTtsConfig();
         if (pages.isEmpty()) {
             pageLabel.setText("No pages yet");
-            cacheLabel.setText("Server: " + getServerBase() + "  Voice: " + getVoice() + " • " + getTrackBuildStatusLabel());
+            cacheLabel.setText("Server: " + displayConfig.serverBase + "  Voice: "
+                    + displayConfig.voice + " • " + getTrackBuildStatusLabel());
             pageSeek.setMax(0);
             pageSeek.setProgress(0);
             if (playbackSeek != null && !playbackSeekUserTouch) {
@@ -1385,7 +1268,15 @@ public class MainActivity extends Activity {
         String text = pages.get(currentPage);
         String cachedText = audioAvailableForPage(currentPage, text) ? "cached/saved" : "not cached";
         pageLabel.setText(String.format(Locale.US, "Page %d / %d", currentPage + 1, pages.size()));
-        cacheLabel.setText(String.format(Locale.US, "%s • %,d chars • %s • %s @ %.2fx • %s", cachedText, text.length(), getVoice(), getResponseFormat(), getTtsSpeed(), getTrackBuildStatusLabel()));
+        cacheLabel.setText(String.format(
+                Locale.US,
+                "%s • %,d chars • %s • %s @ %.2fx • %s",
+                cachedText,
+                text.length(),
+                displayConfig.voice,
+                displayConfig.responseFormat,
+                displayConfig.speed,
+                getTrackBuildStatusLabel()));
         pageSeek.setMax(Math.max(0, pages.size() - 1));
         pageSeek.setProgress(currentPage);
         prevButton.setEnabled(currentPage > 0);
@@ -1397,36 +1288,19 @@ public class MainActivity extends Activity {
         updatePlayPauseButton();
     }
 
-    private File audioFileFor(int pageIndex, String text) {
-        return new File(getAudioCacheDir(), audioFileNameFor(pageIndex, text));
-    }
-
-    private String audioFileNameFor(int pageIndex, String text) {
-        String format = getResponseFormat();
-        String key = getTtsSettingsKey() + "\n" + pageIndex + "\n" + text;
-        String digest = sha256(key).substring(0, 24);
-        return String.format(Locale.US, "page_%04d_%s.%s", pageIndex + 1, digest, safeExtension(format));
-    }
-
-    private String safeExtension(String format) {
-        String f = format.toLowerCase(Locale.US).trim();
-        if (f.matches("[a-z0-9]{2,5}")) {
-            return f;
-        }
-        return "mp3";
-    }
-
     private File getAudioCacheDir() {
-        return new File(getCacheDir(), "kokoro_audio");
+        return KokoroAudioRepository.cacheDirectory(this);
     }
 
     private int clearAudioCache() {
-        releasePlayer();
-        File dir = getAudioCacheDir();
-        int count = deleteChildren(dir);
+        cancelActivityGenerationWork(true);
+        PlaybackService.clearAudioCache(this);
+        stopProgressTicker();
+        activePlaybackDocumentId = "";
+        activePlaybackTtsConfig = null;
         updatePageViews();
-        setStatus("Cleared " + count + " transient cached audio file(s). Saved history audio is kept.");
-        return count;
+        setStatus("Clearing transient audio cache. Saved history audio is kept.");
+        return 0;
     }
 
     private int deleteChildren(File dir) {
@@ -1468,15 +1342,49 @@ public class MainActivity extends Activity {
         if ((savedText == null || savedText.trim().isEmpty()) && textEdit != null) {
             savedText = textEdit.getText().toString();
         }
-        prefs.edit()
-                .putString("lastText", savedText == null ? "" : savedText)
-                .putInt("lastPage", currentPage)
-                .apply();
-        persistCurrentHistoryMetadata();
+        persistCurrentText(savedText == null ? "" : savedText);
+        prefs.edit().putInt("lastPage", currentPage).apply();
+        scheduleHistoryMetadataPersist();
+    }
+
+    private void scheduleHistoryMetadataPersist() {
+        mainHandler.removeCallbacks(historyPersistRunnable);
+        mainHandler.postDelayed(historyPersistRunnable, 350L);
+    }
+
+    private void cancelScheduledHistoryPersist() {
+        mainHandler.removeCallbacks(historyPersistRunnable);
+    }
+
+    private void persistCurrentText(String text) {
+        if (text.equals(lastStoredText)) {
+            return;
+        }
+        try {
+            CurrentTextStore.write(this, text);
+            lastStoredText = text;
+            // Remove the legacy large SharedPreferences value after successful migration/write.
+            prefs.edit().remove("lastText").apply();
+        } catch (Exception ignored) {
+            // Keep the in-memory editor usable even if durable storage is temporarily unavailable.
+        }
     }
 
     private void restoreLastSession(boolean autoPlay) {
-        String text = prefs.getString("lastText", "");
+        String text = "";
+        try {
+            text = CurrentTextStore.read(this);
+        } catch (Exception ignored) {
+        }
+        if (text == null || text.trim().isEmpty()) {
+            // One-time compatibility path for releases that stored the full document in preferences.
+            text = prefs.getString("lastText", "");
+            if (text != null && !text.trim().isEmpty()) {
+                persistCurrentText(text);
+            }
+        } else {
+            lastStoredText = text;
+        }
         if (text == null || text.trim().isEmpty()) {
             setStatus("No saved text session yet.");
             return;
@@ -1484,17 +1392,25 @@ public class MainActivity extends Activity {
         int savedPage = prefs.getInt("lastPage", 0);
         PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
         String normalized = normalizeCopiedText(text);
-        ArrayList<String> restoredPages = splitIntoPages(normalized, getMaxChars());
         if (!autoPlay && snapshot.isActive()) {
             try {
                 PlaybackDocumentStore.Document document = PlaybackDocumentStore.read(this);
-                if (snapshot.documentId.equals(document.id) && document.pages.equals(restoredPages)) {
+                if (snapshot.documentId.equals(document.id)) {
                     fullText = normalized;
                     pages.clear();
-                    pages.addAll(restoredPages);
+                    pages.addAll(document.pages);
                     rebuildPlaybackProgressIndex();
-                    ensureCurrentHistorySession();
+                    repaginateBeforeNextPlayback = !document.pages.equals(
+                            splitIntoPages(normalized, getMaxChars()));
+                    currentSessionId = document.sessionId;
+                    JSONObject activeMeta = currentSessionId.isEmpty()
+                            ? null
+                            : readJsonFile(historySessionJsonFile(currentSessionId));
+                    currentSessionCreatedAt = activeMeta == null
+                            ? System.currentTimeMillis()
+                            : activeMeta.optLong("createdAt", System.currentTimeMillis());
                     activePlaybackDocumentId = snapshot.documentId;
+                    activePlaybackTtsConfig = document.ttsConfig;
                     currentPage = snapshot.pageIndex >= 0 ? snapshot.pageIndex : savedPage;
                     currentPage = Math.max(0, Math.min(currentPage, Math.max(0, pages.size() - 1)));
                     updatePageViews();
@@ -1508,6 +1424,38 @@ public class MainActivity extends Activity {
             }
         }
         setFullTextAndPaginate(text, savedPage, autoPlay, "Loaded saved session.");
+    }
+
+    private TtsConfig getTtsConfig() {
+        return TtsConfig.fromPreferences(this);
+    }
+
+    private TtsConfig getEffectiveTtsConfig() {
+        PlaybackService.Snapshot snapshot = PlaybackService.getSnapshot();
+        if (activePlaybackTtsConfig != null
+                && !activePlaybackDocumentId.isEmpty()
+                && (snapshot.documentId.isEmpty()
+                        || activePlaybackDocumentId.equals(snapshot.documentId))) {
+            return activePlaybackTtsConfig;
+        }
+        return getTtsConfig();
+    }
+
+    private boolean hasActiveOrPendingPlayback() {
+        return PlaybackService.getSnapshot().isActive()
+                || !activePlaybackDocumentId.isEmpty();
+    }
+
+    private boolean storedPlaybackDocumentMatchesActiveId() {
+        if (activePlaybackDocumentId.isEmpty()) {
+            return false;
+        }
+        try {
+            PlaybackDocumentStore.Document document = PlaybackDocumentStore.read(this);
+            return activePlaybackDocumentId.equals(document.id);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private String getServerBase() {
@@ -1535,18 +1483,12 @@ public class MainActivity extends Activity {
         return value.isEmpty() ? "af_bella" : value;
     }
 
-    private double getTtsSpeed() {
-        try {
-            double value = Double.parseDouble(prefString("speed", "1.0").trim());
-            return Math.max(0.25, Math.min(4.0, value));
-        } catch (Exception ex) {
-            return 1.0;
-        }
-    }
-
     private float getPlaybackRate() {
         try {
             float value = Float.parseFloat(prefString("playbackRate", "1.0").trim());
+            if (!Float.isFinite(value)) {
+                return 1.0f;
+            }
             return Math.max(0.25f, Math.min(4.0f, value));
         } catch (Exception ex) {
             return 1.0f;
@@ -1554,21 +1496,7 @@ public class MainActivity extends Activity {
     }
 
     private String getResponseFormat() {
-        String value = prefString("responseFormat", "mp3").trim().toLowerCase(Locale.US);
-        if (value.isEmpty()) {
-            return "mp3";
-        }
-        switch (value) {
-            case "mp3":
-            case "opus":
-            case "aac":
-            case "flac":
-            case "wav":
-            case "pcm":
-                return value;
-            default:
-                return "mp3";
-        }
+        return TtsConfig.normalizeResponseFormat(prefString("responseFormat", "mp3"));
     }
 
     private String getLangCode() {
@@ -1594,19 +1522,7 @@ public class MainActivity extends Activity {
     }
 
     private String getTtsSettingsKey() {
-        return getServerBase()
-                + "\nmodel=" + getModel()
-                + "\nvoice=" + getVoice()
-                + "\ntts_speed=" + getTtsSpeed()
-                + "\nformat=" + getResponseFormat()
-                + "\nstream=" + prefBool("stream", true)
-                + "\nlang=" + getLangCode()
-                + "\nnormalize=" + prefBool("normalize", true)
-                + "\nunit=" + prefBool("unitNorm", false)
-                + "\nurl=" + prefBool("urlNorm", true)
-                + "\nemail=" + prefBool("emailNorm", true)
-                + "\nplural=" + prefBool("pluralNorm", true)
-                + "\nphone=" + prefBool("phoneNorm", true);
+        return getTtsConfig().settingsKey();
     }
 
     private String prefString(String key, String defaultValue) {
@@ -1718,24 +1634,6 @@ public class MainActivity extends Activity {
         return new File(historySessionDir(sessionId), "session.json");
     }
 
-    private File historyAudioDir(String sessionId) {
-        return new File(historySessionDir(sessionId), "audio");
-    }
-
-    private File historyAudioFileFor(String sessionId, int pageIndex, String text) {
-        if (sessionId == null || sessionId.trim().isEmpty()) {
-            return null;
-        }
-        return new File(historyAudioDir(sessionId), audioFileNameFor(pageIndex, text));
-    }
-
-    private File legacyHistoryAudioFileFor(String sessionId, int pageIndex, String text) {
-        if (sessionId == null || sessionId.trim().isEmpty()) {
-            return null;
-        }
-        return new File(historySessionDir(sessionId), audioFileNameFor(pageIndex, text));
-    }
-
     private String safeFileName(String name) {
         String safe = name == null ? "" : name.replaceAll("[^A-Za-z0-9_.-]", "_");
         return safe.isEmpty() ? "session" : safe;
@@ -1763,23 +1661,24 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject currentSettingsSnapshot() throws Exception {
+        TtsConfig config = getEffectiveTtsConfig();
         JSONObject settings = new JSONObject();
-        settings.put("server", getServerBase());
-        settings.put("model", getModel());
-        settings.put("voice", getVoice());
-        settings.put("speed", prefString("speed", "1.0"));
-        settings.put("playbackRate", prefString("playbackRate", "1.0"));
-        settings.put("responseFormat", getResponseFormat());
-        settings.put("stream", prefBool("stream", true));
-        settings.put("langCode", getLangCode());
+        settings.put("server", config.serverBase);
+        settings.put("model", config.model);
+        settings.put("voice", config.voice);
+        settings.put("speed", String.valueOf(config.speed));
+        settings.put("playbackRate", String.valueOf(getPlaybackRate()));
+        settings.put("responseFormat", config.responseFormat);
+        settings.put("stream", config.stream);
+        settings.put("langCode", config.langCode);
         settings.put("maxChars", String.valueOf(getMaxChars()));
         settings.put("autoNextDelayMs", String.valueOf(getAutoNextDelayMs()));
-        settings.put("normalize", prefBool("normalize", true));
-        settings.put("unitNorm", prefBool("unitNorm", false));
-        settings.put("urlNorm", prefBool("urlNorm", true));
-        settings.put("emailNorm", prefBool("emailNorm", true));
-        settings.put("pluralNorm", prefBool("pluralNorm", true));
-        settings.put("phoneNorm", prefBool("phoneNorm", true));
+        settings.put("normalize", config.normalize);
+        settings.put("unitNorm", config.unitNormalization);
+        settings.put("urlNorm", config.urlNormalization);
+        settings.put("emailNorm", config.emailNormalization);
+        settings.put("pluralNorm", config.pluralNormalization);
+        settings.put("phoneNorm", config.phoneNormalization);
         return settings;
     }
 
@@ -1804,7 +1703,8 @@ public class MainActivity extends Activity {
     }
 
     private void persistCurrentHistoryMetadata() {
-        if (!historyEnabled() || currentSessionId == null || currentSessionId.trim().isEmpty() || fullText == null || fullText.trim().isEmpty()) {
+        if (!historyEnabled() || currentSessionId == null || currentSessionId.trim().isEmpty()
+                || fullText == null || fullText.trim().isEmpty()) {
             return;
         }
         try {
@@ -1812,22 +1712,33 @@ public class MainActivity extends Activity {
             if (!dir.exists() && !dir.mkdirs()) {
                 return;
             }
+            File jsonFile = new File(dir, "session.json");
             long now = System.currentTimeMillis();
-            if (currentSessionCreatedAt <= 0L) {
-                currentSessionCreatedAt = now;
+            JSONObject settingsForNewSession = currentSettingsSnapshot();
+            int audioCount = countAudioFilesInSession(currentSessionId);
+            AtomicFileStore.mutateJson(jsonFile, meta -> {
+                long createdAt = meta.optLong("createdAt", currentSessionCreatedAt > 0L
+                        ? currentSessionCreatedAt
+                        : now);
+                JSONObject frozenSettings = meta.optJSONObject("settings");
+                if (frozenSettings == null) {
+                    frozenSettings = settingsForNewSession;
+                }
+                meta.put("id", currentSessionId);
+                meta.put("createdAt", createdAt);
+                meta.put("updatedAt", now);
+                meta.put("currentPage", currentPage);
+                meta.put("pageCount", pages.size());
+                meta.put("charCount", fullText.length());
+                meta.put("title", titleForText(fullText));
+                meta.put("text", fullText);
+                meta.put("settings", frozenSettings);
+                meta.put("audioCount", audioCount);
+            });
+            JSONObject persisted = readJsonFile(jsonFile);
+            if (persisted != null) {
+                currentSessionCreatedAt = persisted.optLong("createdAt", now);
             }
-            JSONObject meta = new JSONObject();
-            meta.put("id", currentSessionId);
-            meta.put("createdAt", currentSessionCreatedAt);
-            meta.put("updatedAt", now);
-            meta.put("currentPage", currentPage);
-            meta.put("pageCount", pages.size());
-            meta.put("charCount", fullText.length());
-            meta.put("title", titleForText(fullText));
-            meta.put("text", fullText);
-            meta.put("settings", currentSettingsSnapshot());
-            meta.put("audioCount", countAudioFilesInSession(currentSessionId));
-            writeString(new File(dir, "session.json"), meta.toString(2));
             pruneHistoryToLimit();
         } catch (Exception ignored) {
         }
@@ -1844,68 +1755,18 @@ public class MainActivity extends Activity {
         return oneLine.length() > 96 ? oneLine.substring(0, 96) + "..." : oneLine;
     }
 
-    private void persistGeneratedAudio(String sessionId, int pageIndex, String text, File source) {
-        if (!historyEnabled() || sessionId == null || sessionId.trim().isEmpty() || source == null || !source.exists() || source.length() == 0) {
-            return;
-        }
-        try {
-            File dst = historyAudioFileFor(sessionId, pageIndex, text);
-            if (dst == null) {
-                return;
-            }
-            File parent = dst.getParentFile();
-            if (parent != null && !parent.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                parent.mkdirs();
-            }
-            if (!dst.equals(source)) {
-                copyFile(source, dst);
-            }
-            persistCurrentHistoryMetadata();
-            mainHandler.post(this::updatePageViews);
-        } catch (Exception ignored) {
-        }
-    }
-
     private File findPlayableAudioFile(int pageIndex, String text) {
         return findPlayableAudioFile(currentSessionId, pageIndex, text);
     }
 
     private File findPlayableAudioFile(String sessionId, int pageIndex, String text) {
-        File cached = audioFileFor(pageIndex, text);
-        if (cached.exists() && cached.length() > 0) {
-            return cached;
-        }
-        if (!historyEnabled()) {
-            return null;
-        }
-        File historical = historyAudioFileFor(sessionId, pageIndex, text);
-        if (historical != null && historical.exists() && historical.length() > 0) {
-            return historical;
-        }
-        File legacy = legacyHistoryAudioFileFor(sessionId, pageIndex, text);
-        if (legacy != null && legacy.exists() && legacy.length() > 0) {
-            return legacy;
-        }
-        return null;
+        return KokoroAudioRepository.findPlayable(
+                this, getEffectiveTtsConfig(), getHistoryLimit(), sessionId, pageIndex, text);
     }
 
     private boolean audioAvailableForPage(int pageIndex, String text) {
         File f = findPlayableAudioFile(pageIndex, text);
         return f != null && f.exists() && f.length() > 0;
-    }
-
-    private int countAvailableAudioFilesForSession(String sessionId) {
-        if (sessionId == null || sessionId.trim().isEmpty() || pages.isEmpty()) {
-            return 0;
-        }
-        int count = 0;
-        for (int i = 0; i < pages.size(); i++) {
-            if (findPlayableAudioFile(sessionId, i, pages.get(i)) != null) {
-                count++;
-            }
-        }
-        return count;
     }
 
     private String getTrackBuildStatusLabel() {
@@ -1949,20 +1810,8 @@ public class MainActivity extends Activity {
         mainHandler.post(this::updatePageViews);
     }
 
-    private File waitForGeneratedAudio(String sessionId, int pageIndex, String text, long timeoutMs) throws Exception {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            File existing = findPlayableAudioFile(sessionId, pageIndex, text);
-            if (existing != null && existing.exists() && existing.length() > 0) {
-                return existing;
-            }
-            Thread.sleep(350L);
-        }
-        return null;
-    }
-
     private void ensurePrefetchAhead(int fromPageIndex, boolean announce) {
-        if (PlaybackService.getSnapshot().isActive()) {
+        if (hasActiveOrPendingPlayback()) {
             return;
         }
         if (pages.isEmpty()) {
@@ -2004,9 +1853,7 @@ public class MainActivity extends Activity {
         int limit = getHistoryLimit();
         File root = getHistoryRootDir();
         if (limit <= 0) {
-            deleteChildren(root);
-            //noinspection ResultOfMethodCallIgnored
-            root.delete();
+            AtomicFileStore.deleteTree(root);
             currentSessionId = "";
             currentSessionCreatedAt = 0L;
             return;
@@ -2015,9 +1862,7 @@ public class MainActivity extends Activity {
         for (int i = limit; i < sessions.size(); i++) {
             String id = sessions.get(i).optString("id", "");
             if (!id.isEmpty() && !id.equals(currentSessionId)) {
-                deleteChildren(historySessionDir(id));
-                //noinspection ResultOfMethodCallIgnored
-                historySessionDir(id).delete();
+                AtomicFileStore.deleteTree(historySessionDir(id));
             }
         }
     }
@@ -2128,7 +1973,7 @@ public class MainActivity extends Activity {
                 continue;
             }
             String name = f.getName().toLowerCase(Locale.US);
-            if (f.isFile() && (name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".aac") || name.endsWith(".flac") || name.endsWith(".opus") || name.endsWith(".pcm"))) {
+            if (f.isFile() && (name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".aac") || name.endsWith(".flac") || name.endsWith(".opus"))) {
                 count++;
             }
         }
@@ -2137,40 +1982,9 @@ public class MainActivity extends Activity {
 
     private JSONObject readJsonFile(File file) {
         try {
-            if (file == null || !file.exists()) {
-                return null;
-            }
-            try (InputStream is = new FileInputStream(file)) {
-                return new JSONObject(readAll(is));
-            }
+            return file == null ? null : AtomicFileStore.readJson(file);
         } catch (Exception ex) {
             return null;
-        }
-    }
-
-    private void writeString(File file, String text) throws Exception {
-        File parent = file.getParentFile();
-        if (parent != null && !parent.exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            parent.mkdirs();
-        }
-        try (FileOutputStream fos = new FileOutputStream(file)) {
-            fos.write(text.getBytes(StandardCharsets.UTF_8));
-        }
-    }
-
-    private void copyFile(File source, File dest) throws Exception {
-        File parent = dest.getParentFile();
-        if (parent != null && !parent.exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            parent.mkdirs();
-        }
-        try (InputStream is = new FileInputStream(source); FileOutputStream os = new FileOutputStream(dest)) {
-            byte[] buffer = new byte[8192];
-            int n;
-            while ((n = is.read(buffer)) != -1) {
-                os.write(buffer, 0, n);
-            }
         }
     }
 
@@ -2185,7 +1999,6 @@ public class MainActivity extends Activity {
         return "App version: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")\n"
                 + "Application ID: " + BuildConfig.APPLICATION_ID + "\n"
                 + "Build type: " + BuildConfig.BUILD_TYPE + "\n"
-                + "Build date: " + BuildConfig.BUILD_TIME_UTC + "\n"
                 + "Git SHA: " + BuildConfig.GIT_SHA + "\n"
                 + "Git commit date: " + BuildConfig.GIT_COMMIT_TIME_UTC + "\n"
                 + "Git branch: " + BuildConfig.GIT_BRANCH + "\n"
@@ -2264,7 +2077,7 @@ public class MainActivity extends Activity {
 
         LinearLayout row3 = row(root);
         LinearLayout formatCol = col(row3, 1);
-        addLabel(formatCol, "Format");
+        addLabel(formatCol, "Format (mp3, opus, aac, flac, wav)");
         EditText formatEdit = addDialogEdit(formatCol, getResponseFormat(), true, 1);
         LinearLayout langCol = col(row3, 1);
         addLabel(langCol, "Language code, blank = auto");
@@ -2317,13 +2130,15 @@ public class MainActivity extends Activity {
 
         dialog.setOnShowListener(d -> {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                cancelActivityGenerationWork(true);
+                int previousMaxChars = getMaxChars();
                 prefs.edit()
                         .putString("server", normalizeServer(serverEdit.getText().toString()))
                         .putString("model", modelEdit.getText().toString().trim())
                         .putString("voice", voiceEdit.getText().toString().trim())
                         .putString("speed", speedEdit.getText().toString().trim())
                         .putString("playbackRate", playbackRateEdit.getText().toString().trim())
-                        .putString("responseFormat", formatEdit.getText().toString().trim().toLowerCase(Locale.US))
+                        .putString("responseFormat", TtsConfig.normalizeResponseFormat(formatEdit.getText().toString()))
                         .putString("langCode", langCodeEdit.getText().toString().trim())
                         .putString("maxChars", maxCharsEdit.getText().toString().trim())
                         .putString("historyLimit", historyLimitEdit.getText().toString().trim())
@@ -2341,14 +2156,20 @@ public class MainActivity extends Activity {
                         .putBoolean("pluralNorm", pluralNormBox.isChecked())
                         .putBoolean("phoneNorm", phoneNormBox.isChecked())
                         .apply();
-                if (!fullText.trim().isEmpty()) {
+                boolean playbackActive = hasActiveOrPendingPlayback();
+                boolean pageSizeChanged = previousMaxChars != getMaxChars();
+                if (playbackActive && pageSizeChanged) {
+                    repaginateBeforeNextPlayback = true;
+                }
+                if (!playbackActive && !fullText.trim().isEmpty()) {
                     int keepPage = currentPage;
                     pages.clear();
                     pages.addAll(splitIntoPages(fullText, getMaxChars()));
                     rebuildPlaybackProgressIndex();
                     currentPage = Math.max(0, Math.min(keepPage, Math.max(0, pages.size() - 1)));
+                    repaginateBeforeNextPlayback = false;
                 }
-                if (historyEnabled() && !fullText.trim().isEmpty()) {
+                if (!playbackActive && historyEnabled() && !fullText.trim().isEmpty()) {
                     ensureCurrentHistorySession();
                 }
                 updatePageViews();
@@ -2363,7 +2184,9 @@ public class MainActivity extends Activity {
                 }
                 updatePlaybackProgress();
                 saveSession();
-                setStatus("Settings saved.");
+                setStatus(playbackActive
+                        ? "Settings saved. TTS and pagination changes apply when you start a new playback run."
+                        : "Settings saved.");
                 dialog.dismiss();
             });
         });
@@ -2389,8 +2212,8 @@ public class MainActivity extends Activity {
             for (String path : paths) {
                 HttpURLConnection conn = null;
                 try {
-                    URL url = new URL(base + path);
-                    conn = (HttpURLConnection) url.openConnection();
+                    conn = (HttpURLConnection) URI.create(base + path).toURL().openConnection();
+                    activityUtilityNetworkScope.register(conn);
                     conn.setRequestMethod("GET");
                     conn.setConnectTimeout(5000);
                     conn.setReadTimeout(10000);
@@ -2406,7 +2229,7 @@ public class MainActivity extends Activity {
                             snippet = snippet.substring(0, 160) + "...";
                         }
                         final String message = "Health OK: HTTP " + code + " " + path + " - " + snippet;
-                        mainHandler.post(() -> {
+                        postIfActivityAlive(() -> {
                             setStatus(message);
                             toast("Kokoro health check OK");
                         });
@@ -2417,12 +2240,13 @@ public class MainActivity extends Activity {
                     lastError = path + ": " + ex.getMessage();
                 } finally {
                     if (conn != null) {
+                        activityUtilityNetworkScope.unregister(conn);
                         conn.disconnect();
                     }
                 }
             }
             final String message = "Health check failed: " + lastError;
-            mainHandler.post(() -> {
+            postIfActivityAlive(() -> {
                 setStatus(message);
                 toast("Kokoro health check failed");
             });
@@ -2435,8 +2259,8 @@ public class MainActivity extends Activity {
         executor.submit(() -> {
             HttpURLConnection conn = null;
             try {
-                URL url = new URL(base + "/v1/audio/voices");
-                conn = (HttpURLConnection) url.openConnection();
+                conn = (HttpURLConnection) URI.create(base + "/v1/audio/voices").toURL().openConnection();
+                activityUtilityNetworkScope.register(conn);
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(10000);
                 conn.setReadTimeout(30000);
@@ -2450,13 +2274,24 @@ public class MainActivity extends Activity {
                     body = readAll(is);
                 }
                 ArrayList<String> voices = parseVoiceList(body);
-                mainHandler.post(() -> showVoiceDialogForField(voices, voiceEdit));
+                postIfActivityAlive(() -> showVoiceDialogForField(voices, voiceEdit));
+            } catch (InterruptedException ignored) {
+                // Activity teardown cancels utility requests without surfacing a stale error.
             } catch (Exception ex) {
-                mainHandler.post(() -> setStatus("Could not fetch voices: " + ex.getMessage()));
+                postIfActivityAlive(() -> setStatus("Could not fetch voices: " + ex.getMessage()));
             } finally {
                 if (conn != null) {
+                    activityUtilityNetworkScope.unregister(conn);
                     conn.disconnect();
                 }
+            }
+        });
+    }
+
+    private void postIfActivityAlive(Runnable action) {
+        mainHandler.post(() -> {
+            if (!destroyed && activityStarted && !isFinishing()) {
+                action.run();
             }
         });
     }

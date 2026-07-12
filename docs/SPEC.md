@@ -58,8 +58,11 @@ Playback is page-based because Kokoro generation is page/chunk-based. The app sh
 - display when progress is an estimate rather than exact playback time;
 - continue generation, playback, prefetch, and automatic page advancement while the screen is off or another app is foreground;
 - survive activity recreation and device rotation without restarting or losing the current page;
-- expose persistent notification controls while a playback queue is active;
-- pause appropriately when another app takes audio focus.
+- expose persistent notification, lock-screen, headset, and Bluetooth media controls while a playback queue is active;
+- pause appropriately when another app takes audio focus or the active audio route becomes noisy;
+- freeze server, voice, model, format, normalization, and generation speed for the lifetime of one document;
+- cancel queued work and disconnect active Kokoro requests when playback stops or a document is replaced;
+- never restart stale speech merely because Android recreated the service after process death.
 
 ## Progress-bar modes
 
@@ -125,7 +128,7 @@ Settings should include:
 - voice/mix;
 - Kokoro TTS speed;
 - local playback rate;
-- response format;
+- response format (`mp3`, `opus`, `aac`, `flac`, or `wav`);
 - language code override;
 - page/chunk size;
 - history retention limit;

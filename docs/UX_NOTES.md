@@ -53,8 +53,8 @@ Dark mode is default for comfortable listening. Light mode exists for bright con
 
 These are intentionally not implemented yet, but the current architecture should not block them:
 
-- Bluetooth media-button handling;
-- lock-screen controls;
+- richer Android Auto integration;
+- sleep timer and end-of-page stop modes;
 - history export/import;
 - per-session delete from History;
 - favorites/pinned sessions;

@@ -1,87 +1,108 @@
-# Manual Test Plan
+# Device Test Plan
 
-Use this checklist after installing a debug build.
+Run the automated pre-install suite first:
 
-## Basic launch
+```bash
+./test_debug.sh
+```
 
-- Launch app.
-- Confirm dark mode is enabled by default.
-- Confirm the app does not crash before any text is loaded.
-- Confirm top row has History and Settings.
-- Confirm previous/next buttons are spaced correctly and neither appears twice.
+Then run the connected lifecycle test on an emulator or disposable test device:
 
-## Settings
+```bash
+KOKORO_ALLOW_DESTRUCTIVE_CONNECTED_TESTS=1 ./connected_test.sh
+```
 
-- Open Settings.
-- Confirm the default server URL is `http://192.168.222.38:8880`.
-- Tap Health Check with Kokoro running; expect success.
-- Stop Kokoro or point to a bad URL; expect a clear failure message.
-- Toggle light mode, Save, confirm the main UI changes.
-- Toggle dark mode back on, Save.
-- Set history limit to 0, Save, confirm History says disabled/empty.
-- Set history limit back to 20, Save.
+See `docs/TESTING.md` for exact automated coverage. Use the remaining checklist after installing a debug build on the target phone.
+
+## Basic launch and recreation
+
+- Launch with no saved text; confirm no crash and an idle HUD.
+- Confirm dark mode is the default and top controls are not duplicated.
+- Rotate several times while idle; confirm Android recreates the activity cleanly.
+- Background and foreground the app; confirm the editor and selected page remain coherent.
+
+## Settings and configuration snapshots
+
+- Confirm the default server URL is `http://10.0.2.2:8880` unless overridden by local build configuration.
+- Health Check succeeds against a running Kokoro server and reports a clear error for a bad endpoint.
+- Fetch Voices populates the voice selector.
+- Confirm response formats are limited to `mp3`, `opus`, `aac`, `flac`, and `wav`.
+- Start a multi-page document, then change voice/server/speed/format while it plays; confirm the active queue keeps its original settings and a newly started document uses the new settings.
+- Change chars-per-page while playback is active; confirm the visible/active pages do not jump, then stop and explicitly Play again and confirm repagination occurs at approximately the same document position.
+- Toggle light/dark mode and confirm the main UI and dialogs update.
+- Set history retention to 0, save, and confirm retained history is pruned; restore it to 20.
 
 ## Text and pagination
 
-- Paste a short paragraph manually.
-- Confirm it paginates and displays page 1/1.
-- Paste a long multi-paragraph text.
-- Confirm page slider max changes and arrows move pages.
-- Edit the visible page and tap Play Text; confirm it treats the edited visible text as a new document.
-- Tap Clear Text and cancel; confirm text remains.
-- Tap Clear Text and confirm; text/page state clears while history remains.
+- Paste short and long text; confirm page count, arrows, and page slider update.
+- Share `text/plain` into the app and confirm pagination.
+- Edit a visible page and tap **Play Text**; confirm it becomes a new document.
+- Clear Text with cancel and confirm nothing changes; confirm Clear Text preserves history.
 
-## Playback
+## Foreground playback
 
-- Load a multi-page text.
-- Tap Play Text.
-- During generation, confirm HUD says it is receiving/fetching and progress is estimated.
-- After playback starts, confirm play/pause toggles.
-- Drag the playback bar on the current page; confirm seeking works after audio is prepared.
-- Let page 1 finish; confirm auto-next starts page 2 when enabled.
-- Disable auto-next and confirm playback stops after the current page.
+- Start a multi-page document and confirm generation status/progress is visible.
+- After preparation, verify play/pause, volume, playback rate, and seek.
+- Let a page finish; verify auto-next advances when enabled and stops when disabled.
+- Enable whole-text progress and confirm it does not reset at page boundaries.
+- Switch to current-page progress and confirm the bar becomes page-local.
 
-## Rotation and background playback
+## Rotation and background ownership
 
-- Start a multi-page document and rotate the phone while generation is active; confirm generation continues and playback starts once ready.
-- Rotate while audio is playing; confirm the same page continues from the same position without an audible restart.
-- Press Home or open another app; let the current page finish and confirm the next page is generated/played automatically.
-- Turn the screen off for longer than one page; confirm playback and auto-next continue.
-- Confirm the foreground notification shows the current page and offers Play/Pause and Stop.
-- Pause and resume from the notification while Kokoro Reader is not visible.
-- Stop from the notification; confirm audio, generation, and auto-next stop and the notification disappears.
-- Return to Kokoro Reader during background playback; confirm the page indicator, play/pause button, and progress bar synchronize with the service.
-- On Android 13+, deny notification permission once and confirm playback still starts without crashing; grant it and confirm controls appear normally.
-- Start one document, then immediately play different text; confirm the old queue cannot resume or overwrite the new queue.
+- Rotate during an active HTTP request; generation continues and stale activity callbacks do not duplicate playback.
+- Rotate during playback; audio continues from the same position without restart.
+- Press Home or open another app; verify the current page and subsequent pages continue.
+- Turn the screen off for longer than one page; verify auto-next and prefetch continue.
+- Return to the activity and confirm page, progress, status, and play/pause synchronize with the service.
 
-## Whole-text vs current-page progress
+## Notification and media session
 
-- Enable whole-text progress.
-- Start playback from page 1 of a multi-page text.
-- Confirm progress does not reset to zero when auto-advancing to page 2.
-- Disable whole-text progress.
-- Confirm progress is page-local.
+- Confirm the foreground notification shows current page state and play/pause, next, and stop actions.
+- Exercise controls from the notification and lock screen.
+- Exercise wired-headset and Bluetooth play/pause/next controls.
+- Disconnect headphones/Bluetooth during playback; confirm playback pauses rather than switching audibly to the phone speaker.
+- On Android 13+, deny notification permission and confirm playback still fails gracefully or continues within platform rules without crashing; grant it and verify controls.
 
-## Prefetch
+## Audio focus
 
-- Set prefetch pages to at least 2.
-- Start playback on a multi-page text.
-- Watch HUD/audio counts increase as future pages are generated.
-- Simulate a brief network/server delay after current page starts; confirm already-prefetched pages continue to play.
+- Start another media app while Kokoro Reader plays; confirm Kokoro Reader pauses on focus loss.
+- Stop the competing audio after transient loss; confirm Kokoro Reader resumes only when appropriate.
+- Trigger a permanent focus loss; confirm it remains paused until the user explicitly resumes.
+- Request playback while focus is temporarily delayed; confirm audio does not start until focus is granted.
 
-## History and offline replay
+## Cancellation and queue replacement
 
-- Generate at least two pages.
-- Open History and confirm the session row shows an audio count.
-- Select the history row and confirm it loads and plays.
-- Clear transient audio cache.
-- Select the history row again; confirm pages with saved audio replay without server generation.
-- Tap Clear History and confirm.
-- Open History; confirm history is empty.
+- Start generation over a throttled connection, press Stop, and verify the request disconnects, no partial audio becomes playable, no page auto-starts later, and the notification disappears.
+- Stop while prefetch is active; verify future pages stop appearing in cache/history.
+- Clear Audio Cache during a throttled foreground or manual generation; verify the request is cancelled and no late cache file reappears after the clear completes.
+- Clear History during a throttled foreground or manual generation; verify no late history directory/audio/metadata reappears after the clear completes.
+- Start document A and immediately replace it with document B; verify A cannot resume, overwrite B's state, or publish stale UI progress.
+- Rapidly press play/stop/play; verify exactly one active queue and player.
 
-## Icon
+## Process-death semantics
 
-- Build the app with root `icon.png` present.
-- Inspect generated launcher icon with `gdalinfo app/build/generated/res/rootLauncherIcon/mipmap-xxxhdpi/ic_launcher.png`.
-- Confirm there is an alpha band.
-- Install and confirm Android launcher does not show an opaque white square around the icon.
+- Start playback, then force-stop or kill the app process from Android tooling.
+- Confirm stale speech does not restart later merely because Android recreates the service.
+- Reopen the app; confirm saved editor/history data can be selected explicitly, but playback does not begin without user action.
+
+## Prefetch and deduplication
+
+- Set prefetch-ahead to at least 2 and verify future ready counts increase.
+- Trigger Settings pre-generation for a page already being prefetched; verify only one Kokoro request occurs for that page/cache key.
+- Introduce a brief server outage after pages are prefetched; verify ready pages continue and speculative errors do not spam dialogs.
+
+## History, atomicity, and offline replay
+
+- Generate multiple pages, open History, and verify metadata/audio counts.
+- Clear transient cache and replay retained pages with the server offline.
+- Interrupt the app/process during metadata write or audio download; relaunch and confirm JSON remains readable and truncated audio is not accepted.
+- Exercise rapid page changes while background prefetch updates history; confirm current page and audio counts are not lost.
+- Clear History and confirm current editor text remains.
+- Upgrade from a build with legacy `lastText` preferences, restore once, and confirm `current_text_session.json` is created and the legacy preference is removed.
+
+## Build and packaging
+
+- Run `./build_debug.sh` without a system Gradle and verify the downloaded distribution checksum and ZIP integrity are checked.
+- Build twice from identical source/Git state and confirm no wall-clock build timestamp forces different app inputs.
+- Inspect the generated launcher icon alpha and confirm no opaque white square.
+- Confirm the notification uses the dedicated monochrome status icon.

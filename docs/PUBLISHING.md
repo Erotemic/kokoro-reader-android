@@ -32,9 +32,9 @@ The value is not in the repo, but it is in the built APK. Do not distribute a de
 
 ## Build metadata
 
-Every APK also embeds non-secret build metadata into `BuildConfig`: UTC build time, short Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Settings shows these values under **Build information** and includes a **Copy Build Info** button.
+Every APK embeds non-secret source metadata into `BuildConfig`: short Git SHA, Git commit date, branch, `git describe`, and clean/dirty tree state. Settings shows these values under **Build information** and includes a **Copy Build Info** button. A wall-clock build timestamp is deliberately omitted so otherwise identical builds are not made different merely by when they ran.
 
-If the checkout does not have `.git` metadata, the Git values fall back to `unknown`; builds should still succeed from source archives.
+If the checkout does not have `.git` metadata, the Git values fall back to `unknown`; builds should still succeed from source archives. When `build_debug.sh` must download Gradle, it verifies the distribution's published SHA-256 checksum and ZIP integrity before execution.
 
 ## Before the first public GitHub push
 
