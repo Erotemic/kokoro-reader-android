@@ -1,8 +1,8 @@
 # Kokoro Reader Android
 
-A native Android reader for speaking long copied/shared text through a home Kokoro-FastAPI server.
+A native Android reader for speaking long copied or shared text through a home Kokoro-FastAPI server. It is designed for long-form playback that survives activity recreation, screen rotation, screen-off, Home, and app switching.
 
-This version is tuned for the workflow you described: **large controls, simple car-friendly main screen, page flipping before playback, and advanced settings hidden behind a menu**.
+The app is tuned for **large controls, a simple car-friendly main screen, page selection before playback, background media controls, and advanced settings hidden behind a menu**. The repository also includes an install-free automated test gate and a separate connected Android lifecycle test.
 
 ## Main screen
 
@@ -93,7 +93,8 @@ The `docs/` folder now records the intended behavior and maintenance notes:
 - `docs/STORAGE.md` - cache/history storage layout and retention policy.
 - `docs/PLAYBACK_AND_PREFETCH.md` - progress, seeking, auto-advance, and prefetch design.
 - `docs/UX_NOTES.md` - UI/UX polishing guidelines.
-- `docs/TEST_PLAN.md` - manual test checklist for debug builds.
+- `docs/TESTING.md` - automated test layers, coverage boundaries, and report locations.
+- `docs/TEST_PLAN.md` - focused manual/device checklist for behavior that cannot be fully proven on the JVM.
 
 ## Endpoint assumption
 
@@ -127,15 +128,16 @@ and a body like:
 
 If the language code field is blank, the app omits `lang_code` and lets Kokoro derive it from the selected voice.
 
-## Build prerequisites on Linux
+## Build and test prerequisites on Linux
 
 You need:
 
-- JDK 17+
+- JDK 17 or newer
 - Android SDK command-line tools or Android Studio
 - Android platform SDK 35
 - Android build-tools 35.x
-- `adb` for installing on the Pixel 5
+- `adb` only for installation and connected-device tests
+- network access on the first Gradle/test run unless all Gradle and Maven artifacts are already cached
 
 A typical SDK install looks like this if you already have `sdkmanager` available:
 
@@ -149,6 +151,14 @@ Set `ANDROID_HOME` if your environment does not already do it:
 export ANDROID_HOME="$HOME/Android/Sdk"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 ```
+
+The test stack uses AndroidX and Robolectric. The repository therefore commits:
+
+```properties
+android.useAndroidX=true
+```
+
+Do not change that property to `false`; Gradle will reject the AndroidX unit-test classpath before tests compile.
 
 ## Build
 
@@ -168,21 +178,63 @@ The debug APK will be here:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Test before installing
+## Validate before installing
 
-Run the deterministic JVM, Robolectric, storage, and fake-Kokoro integration suite:
+The normal pre-install gate is:
 
 ```bash
 ./test_debug.sh
 ```
 
-With an emulator or authorized test device connected, run the Android lifecycle test that uses real foreground playback and recreates the activity while a two-page WAV queue is playing:
+This runs `testDebugUnitTest`, which includes plain JVM tests, Robolectric service/lifecycle tests, atomic-storage tests, and loopback fake-Kokoro HTTP integration tests. It does **not** install an APK, require a device, contact your configured Kokoro server, or modify app data on a phone. The fake server is a small dependency-free `ServerSocket` implementation, so the test source does not depend on the optional JDK `jdk.httpserver` module.
+
+The fast suite covers, among other things:
+
+- text normalization and bounded pagination
+- immutable per-document TTS configuration and cache identity
+- atomic document, history, editor, and audio publication
+- request coalescing, cancellation, and stale-result rejection
+- truncated-response and invalid-cache rejection
+- service restart, audio-focus, auto-next, and seek policies
+- selected notification, command, and lifecycle behavior under Robolectric
+
+The HTML report is written to:
+
+```text
+app/build/reports/tests/testDebugUnitTest/index.html
+```
+
+A successful fast suite is the minimum gate before building or installing the APK. It still cannot prove real `MediaPlayer`, foreground-service, notification, lock-screen, headset, Bluetooth, or OEM battery-management behavior.
+
+### Connected Android lifecycle test
+
+With a disposable emulator or authorized test device connected, run:
 
 ```bash
 KOKORO_ALLOW_DESTRUCTIVE_CONNECTED_TESTS=1 ./connected_test.sh
 ```
 
-See [`docs/TESTING.md`](docs/TESTING.md) for the coverage boundary and report locations. The fast suite does not install an APK; the connected suite installs test artifacts only on the selected emulator/device.
+This installs debug test artifacts, starts real foreground playback from valid locally served WAV responses, recreates `MainActivity`, and verifies that the service-owned queue remains active and advances to page two. The explicit opt-in is required because the test stops playback and clears the debug app's text, history, and audio cache.
+
+The connected-test report is written to:
+
+```text
+app/build/reports/androidTests/connected/debug/index.html
+```
+
+See [`docs/TESTING.md`](docs/TESTING.md) for the exact automated coverage boundary and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) for remaining device checks.
+
+### Interpreting common Gradle output
+
+These messages are informational and do not indicate test failure:
+
+- `To honour the JVM settings ... a single-use Daemon process will be forked`
+- `Daemon will be stopped at the end of the build`
+- Javac notes that production code uses or overrides a deprecated Android API
+
+The build has failed only when Gradle reports a `FAILED` task or ends with `BUILD FAILED`.
+
+If Gradle reports that AndroidX dependencies are present but AndroidX is disabled, verify that `gradle.properties` contains `android.useAndroidX=true`. If `FakeKokoroServer.java` mentions `com.sun.net.httpserver`, the checkout contains an obsolete test helper; the current implementation uses `ServerSocket` and has no `jdk.httpserver` dependency.
 
 ### Local server config
 
