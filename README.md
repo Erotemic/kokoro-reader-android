@@ -52,11 +52,13 @@ You can also open **Settings -> Load Last Session**.
 
 The Settings dialog includes:
 
-- server URL, e.g. `http://10.0.2.2:8880` for the Android emulator or `http://YOUR-LAN-HOST:8880` for a phone on your LAN/VPN
-- model, default `kokoro`
-- voice or voice mix, e.g. `af_bella` or `af_bella+af_sky`
-- **Health Check**, which tries `/health` and then `/v1/audio/voices`
-- **Fetch Voices** from `/v1/audio/voices`
+- server URL, e.g. `http://10.0.2.2:8880` for the Android emulator or a LAN/VPN endpoint on a phone;
+- **Discover Server**, which queries `/v1/models` and compatible voice-list endpoints, filters Wavhost-style `installed=false` models, and offers the server's usable model/voice choices;
+- **Saved Servers**, a bounded per-endpoint history that remembers URL, model, voice, response format, stream flag, and language so switching between e.g. Kokoro `:8880` and qwentts `:11436` restores compatible settings;
+- model, still manually editable for servers that do not expose discovery metadata;
+- voice or voice mix, still manually editable for nonstandard servers;
+- **Health Check** against the configured endpoint;
+- **Fetch Voices**, preferring `/v1/audio/voices` and falling back to `/v1/voices`;
 - TTS speed sent to Kokoro
 - local phone playback rate
 - response format: `mp3`, `opus`, `aac`, `flac`, or `wav`
@@ -74,8 +76,18 @@ The Settings dialog includes:
 - dark / light mode, defaulting to dark
 - build information: app version, build type, Git SHA, Git commit date, branch, describe string, and clean/dirty tree state
 
-For best Android playback compatibility, start with `mp3`.
+For Kokoro, `mp3` is a good default. qwentts.cpp currently requires `wav` for Android `MediaPlayer` compatibility; saved server profiles keep those endpoint-specific choices separate.
 
+
+### Multiple TTS endpoints and model discovery
+
+The app treats the server URL as the authority. It does not hard-code a Kokoro/Qwen provider switch. Use **Discover Server** after entering a URL:
+
+- a qwentts.cpp process advertises the single model already loaded by that process; changing the Android `model` field does not load another qwentts model, so use another server/port (or server-side control plane) for a different qwentts model;
+- Wavhost advertises its registry through `/v1/models`, including `installed` state and model speaker metadata. The app only offers installed entries, and Wavhost uses the request's `model` field to select among installed models;
+- Kokoro and other OpenAI-compatible servers can continue to use whatever subset of discovery endpoints they expose. Manual model/voice fields remain available as a fallback.
+
+The Android app intentionally does **not** install models, assign GPUs, start/stop containers, or otherwise mutate server state. Those are server/control-plane responsibilities. Multiple GPU-backed endpoints can run concurrently and be remembered independently in **Saved Servers**.
 
 ## Speech history and offline replay
 
@@ -203,6 +215,14 @@ The HTML report is written to:
 ```text
 app/build/reports/tests/testDebugUnitTest/index.html
 ```
+
+Before installing against a new real TTS backend, also run the host-side API/audio preflight:
+
+```bash
+./server_smoke_test.sh
+```
+
+It checks health/models/voices, sends the same speech-request shape as the Android app, retains the returned audio under `build/server-smoke/`, and validates WAV responses. Configure `TTS_SMOKE_*` values in the ignored `.env` file; see `docs/TESTING.md`.
 
 A successful fast suite is the minimum gate before building or installing the APK. It still cannot prove real `MediaPlayer`, foreground-service, notification, lock-screen, headset, Bluetooth, or OEM battery-management behavior.
 

@@ -4,7 +4,7 @@ This document records the app behavior that has been implemented so future chang
 
 ## Product goal
 
-Kokoro Reader is a simple native Android text-to-speech reader for long copied or shared text. It talks to a private Kokoro-FastAPI server on the local network, generates audio page-by-page, and makes generated sessions available for later replay when cached audio is available.
+Kokoro Reader is a simple native Android text-to-speech reader for long copied or shared text. It talks to a private OpenAI-compatible TTS server on the local network (including Kokoro-FastAPI, qwentts.cpp, and Wavhost), generates audio page-by-page, and makes generated sessions available for later replay when cached audio is available.
 
 The app is intentionally optimized for a low-friction, large-control workflow on a phone: paste/share text, page through it, start reading, and recover smoothly from server/network latency.
 
@@ -123,9 +123,10 @@ Settings should include:
 
 - server URL;
 - health check;
-- voice fetch;
-- model;
-- voice/mix;
+- server discovery from `/v1/models` plus compatible voice-list endpoints;
+- bounded saved server profiles that preserve endpoint-specific model/voice/format choices;
+- model, with manual fallback when discovery is unavailable;
+- voice/mix, with manual fallback when discovery is unavailable;
 - Kokoro TTS speed;
 - local playback rate;
 - response format (`mp3`, `opus`, `aac`, `flac`, or `wav`);

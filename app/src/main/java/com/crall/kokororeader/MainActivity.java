@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -2052,6 +2053,11 @@ public class MainActivity extends Activity {
         EditText serverEdit = addDialogEdit(root, getServerBase(), true, 1);
         serverEdit.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
 
+        LinearLayout serverButtons = row(root);
+        Button discoverButton = addDialogButton(serverButtons, "Discover Server", 1);
+        Button savedServersButton = addDialogButton(serverButtons, "Saved Servers", 1);
+        Button healthButton = addDialogButton(serverButtons, "Health Check", 1);
+
         LinearLayout row1 = row(root);
         LinearLayout modelCol = col(row1, 1);
         addLabel(modelCol, "Model");
@@ -2061,7 +2067,6 @@ public class MainActivity extends Activity {
         EditText voiceEdit = addDialogEdit(voiceCol, getVoice(), true, 1);
 
         LinearLayout voiceButtons = row(root);
-        Button healthButton = addDialogButton(voiceButtons, "Health Check", 1);
         Button fetchVoicesButton = addDialogButton(voiceButtons, "Fetch Voices", 1);
         Button clearCacheButton = addDialogButton(voiceButtons, "Clear Audio Cache", 1);
 
@@ -2105,7 +2110,7 @@ public class MainActivity extends Activity {
         CheckBox wholeTextProgressBox = addDialogCheck(root, "Playback bar tracks entire text", prefBool("wholeTextProgress", true));
         CheckBox autoRestoreBox = addDialogCheck(root, "Auto-load last text/session at startup", prefBool("autoRestore", true));
 
-        addLabel(root, "Kokoro normalization options");
+        addLabel(root, "Kokoro-compatible normalization options (ignored by other servers)");
         CheckBox normalizeBox = addDialogCheck(root, "normalize", prefBool("normalize", true));
         CheckBox unitNormBox = addDialogCheck(root, "unit normalization", prefBool("unitNorm", false));
         CheckBox urlNormBox = addDialogCheck(root, "URL normalization", prefBool("urlNorm", true));
@@ -2132,20 +2137,26 @@ public class MainActivity extends Activity {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
                 cancelActivityGenerationWork(true);
                 int previousMaxChars = getMaxChars();
+                String savedServer = normalizeServer(serverEdit.getText().toString());
+                String savedModel = modelEdit.getText().toString().trim();
+                String savedVoice = voiceEdit.getText().toString().trim();
+                String savedFormat = TtsConfig.normalizeResponseFormat(formatEdit.getText().toString());
+                String savedLang = langCodeEdit.getText().toString().trim();
+                boolean savedStream = streamBox.isChecked();
                 prefs.edit()
-                        .putString("server", normalizeServer(serverEdit.getText().toString()))
-                        .putString("model", modelEdit.getText().toString().trim())
-                        .putString("voice", voiceEdit.getText().toString().trim())
+                        .putString("server", savedServer)
+                        .putString("model", savedModel)
+                        .putString("voice", savedVoice)
                         .putString("speed", speedEdit.getText().toString().trim())
                         .putString("playbackRate", playbackRateEdit.getText().toString().trim())
-                        .putString("responseFormat", TtsConfig.normalizeResponseFormat(formatEdit.getText().toString()))
-                        .putString("langCode", langCodeEdit.getText().toString().trim())
+                        .putString("responseFormat", savedFormat)
+                        .putString("langCode", savedLang)
                         .putString("maxChars", maxCharsEdit.getText().toString().trim())
                         .putString("historyLimit", historyLimitEdit.getText().toString().trim())
                         .putString("autoNextDelayMs", autoNextDelayEdit.getText().toString().trim())
                         .putString("prefetchPages", prefetchEdit.getText().toString().trim())
                         .putBoolean("darkMode", darkModeBox.isChecked())
-                        .putBoolean("stream", streamBox.isChecked())
+                        .putBoolean("stream", savedStream)
                         .putBoolean("autoNext", autoNextBox.isChecked())
                         .putBoolean("wholeTextProgress", wholeTextProgressBox.isChecked())
                         .putBoolean("autoRestore", autoRestoreBox.isChecked())
@@ -2156,6 +2167,15 @@ public class MainActivity extends Activity {
                         .putBoolean("pluralNorm", pluralNormBox.isChecked())
                         .putBoolean("phoneNorm", phoneNormBox.isChecked())
                         .apply();
+                TtsEndpointProfileStore.remember(
+                        prefs,
+                        new TtsEndpointProfileStore.Profile(
+                                savedServer,
+                                savedModel,
+                                savedVoice,
+                                savedFormat,
+                                savedStream,
+                                savedLang));
                 boolean playbackActive = hasActiveOrPendingPlayback();
                 boolean pageSizeChanged = previousMaxChars != getMaxChars();
                 if (playbackActive && pageSizeChanged) {
@@ -2191,8 +2211,11 @@ public class MainActivity extends Activity {
             });
         });
 
+        discoverButton.setOnClickListener(v -> discoverEndpointIntoFields(serverEdit, modelEdit, voiceEdit));
+        savedServersButton.setOnClickListener(v -> showSavedEndpointProfiles(
+                serverEdit, modelEdit, voiceEdit, formatEdit, langCodeEdit, streamBox));
         healthButton.setOnClickListener(v -> healthCheckServer(serverEdit));
-        fetchVoicesButton.setOnClickListener(v -> fetchVoicesIntoField(serverEdit, voiceEdit));
+        fetchVoicesButton.setOnClickListener(v -> fetchVoicesIntoField(serverEdit, modelEdit, voiceEdit));
         clearCacheButton.setOnClickListener(v -> clearAudioCache());
         loadButton.setOnClickListener(v -> restoreLastSession(false));
         historyDialogButton.setOnClickListener(v -> showHistoryDialog());
@@ -2205,7 +2228,7 @@ public class MainActivity extends Activity {
 
     private void healthCheckServer(EditText serverEdit) {
         String base = normalizeServer(serverEdit.getText().toString());
-        setStatus("Checking Kokoro health at " + base + "...");
+        setStatus("Checking TTS health at " + base + "...");
         executor.submit(() -> {
             String[] paths = new String[]{"/health", "/v1/audio/voices"};
             String lastError = "no response";
@@ -2231,7 +2254,7 @@ public class MainActivity extends Activity {
                         final String message = "Health OK: HTTP " + code + " " + path + " - " + snippet;
                         postIfActivityAlive(() -> {
                             setStatus(message);
-                            toast("Kokoro health check OK");
+                            toast("TTS health check OK");
                         });
                         return;
                     }
@@ -2248,44 +2271,216 @@ public class MainActivity extends Activity {
             final String message = "Health check failed: " + lastError;
             postIfActivityAlive(() -> {
                 setStatus(message);
-                toast("Kokoro health check failed");
+                toast("TTS health check failed");
             });
         });
     }
 
-    private void fetchVoicesIntoField(EditText serverEdit, EditText voiceEdit) {
+    private void fetchVoicesIntoField(EditText serverEdit, EditText modelEdit, EditText voiceEdit) {
         String base = normalizeServer(serverEdit.getText().toString());
+        String selectedModel = modelEdit.getText().toString().trim();
         setStatus("Fetching voices from " + base + "...");
         executor.submit(() -> {
-            HttpURLConnection conn = null;
             try {
-                conn = (HttpURLConnection) URI.create(base + "/v1/audio/voices").toURL().openConnection();
-                activityUtilityNetworkScope.register(conn);
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(30000);
-                conn.setRequestProperty("Accept", "application/json");
-                int code = conn.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    throw new IllegalStateException("HTTP " + code + ": " + readError(conn));
+                ArrayList<String> endpointVoices;
+                try {
+                    endpointVoices = fetchEndpointVoices(base);
+                } catch (InterruptedException ex) {
+                    throw ex;
+                } catch (Exception ignored) {
+                    endpointVoices = new ArrayList<>();
                 }
-                String body;
-                try (InputStream is = conn.getInputStream()) {
-                    body = readAll(is);
+                TtsEndpointDiscovery.ModelOption model = null;
+                try {
+                    ArrayList<TtsEndpointDiscovery.ModelOption> models = TtsEndpointDiscovery.usableModels(
+                            TtsEndpointDiscovery.parseModels(fetchEndpointBody(base, "/v1/models", 10000, 30000)));
+                    model = TtsEndpointDiscovery.findModel(models, selectedModel);
+                } catch (InterruptedException ex) {
+                    throw ex;
+                } catch (Exception ignored) {
+                    // Voice-only servers remain supported.
                 }
-                ArrayList<String> voices = parseVoiceList(body);
+                ArrayList<String> voices = TtsEndpointDiscovery.voicesForModel(model, endpointVoices);
+                if (voices.isEmpty()) {
+                    throw new IllegalStateException("Server advertised no voices for the selected model.");
+                }
                 postIfActivityAlive(() -> showVoiceDialogForField(voices, voiceEdit));
             } catch (InterruptedException ignored) {
                 // Activity teardown cancels utility requests without surfacing a stale error.
             } catch (Exception ex) {
                 postIfActivityAlive(() -> setStatus("Could not fetch voices: " + ex.getMessage()));
-            } finally {
-                if (conn != null) {
-                    activityUtilityNetworkScope.unregister(conn);
-                    conn.disconnect();
-                }
             }
         });
+    }
+
+    private ArrayList<String> fetchEndpointVoices(String base) throws Exception {
+        Exception firstFailure = null;
+        for (String path : new String[]{"/v1/audio/voices", "/v1/voices"}) {
+            try {
+                return TtsEndpointDiscovery.parseVoices(fetchEndpointBody(base, path, 10000, 30000));
+            } catch (InterruptedException ex) {
+                throw ex;
+            } catch (Exception ex) {
+                if (firstFailure == null) {
+                    firstFailure = ex;
+                }
+            }
+        }
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+        throw new IllegalStateException("Server did not expose a compatible voice list.");
+    }
+
+    private String fetchEndpointBody(String base, String path, int connectTimeout, int readTimeout) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) URI.create(base + path).toURL().openConnection();
+            activityUtilityNetworkScope.register(conn);
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(connectTimeout);
+            conn.setReadTimeout(readTimeout);
+            conn.setRequestProperty("Accept", "application/json");
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("HTTP " + code + " " + path + ": " + readError(conn));
+            }
+            try (InputStream is = conn.getInputStream()) {
+                return readAll(is);
+            }
+        } finally {
+            if (conn != null) {
+                activityUtilityNetworkScope.unregister(conn);
+                conn.disconnect();
+            }
+        }
+    }
+
+    private void discoverEndpointIntoFields(
+            EditText serverEdit,
+            EditText modelEdit,
+            EditText voiceEdit) {
+        String base = normalizeServer(serverEdit.getText().toString());
+        setStatus("Discovering TTS models and voices at " + base + "...");
+        executor.submit(() -> {
+            try {
+                ArrayList<TtsEndpointDiscovery.ModelOption> models = TtsEndpointDiscovery.usableModels(
+                        TtsEndpointDiscovery.parseModels(fetchEndpointBody(base, "/v1/models", 10000, 30000)));
+                if (models.isEmpty()) {
+                    throw new IllegalStateException("Server advertised no installed/usable models.");
+                }
+                ArrayList<String> endpointVoices;
+                try {
+                    endpointVoices = fetchEndpointVoices(base);
+                } catch (InterruptedException ex) {
+                    throw ex;
+                } catch (Exception ignored) {
+                    endpointVoices = new ArrayList<>();
+                }
+                ArrayList<String> voices = endpointVoices;
+                postIfActivityAlive(() -> showDiscoveredModels(models, voices, modelEdit, voiceEdit));
+            } catch (InterruptedException ignored) {
+                // Activity teardown cancels utility requests without surfacing a stale error.
+            } catch (Exception ex) {
+                postIfActivityAlive(() -> setStatus("Could not discover server: " + ex.getMessage()));
+            }
+        });
+    }
+
+    private void showDiscoveredModels(
+            ArrayList<TtsEndpointDiscovery.ModelOption> models,
+            ArrayList<String> endpointVoices,
+            EditText modelEdit,
+            EditText voiceEdit) {
+        if (models.isEmpty()) {
+            setStatus("Server advertised no usable models.");
+            return;
+        }
+        if (models.size() == 1) {
+            applyDiscoveredModel(models.get(0), endpointVoices, modelEdit, voiceEdit, true);
+            return;
+        }
+        String[] items = new String[models.size()];
+        for (int i = 0; i < models.size(); i++) {
+            items[i] = models.get(i).id;
+        }
+        setStatus("Discovered " + items.length + " usable models. Choose one.");
+        new AlertDialog.Builder(this)
+                .setTitle("Choose model")
+                .setItems(items, (dialog, which) ->
+                        applyDiscoveredModel(models.get(which), endpointVoices, modelEdit, voiceEdit, true))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void applyDiscoveredModel(
+            TtsEndpointDiscovery.ModelOption model,
+            ArrayList<String> endpointVoices,
+            EditText modelEdit,
+            EditText voiceEdit,
+            boolean offerVoiceChoice) {
+        modelEdit.setText(model.id);
+        ArrayList<String> voices = TtsEndpointDiscovery.voicesForModel(model, endpointVoices);
+        String current = voiceEdit.getText().toString().trim();
+        String preferred = matchingVoice(voices, current);
+        if (preferred == null && !model.defaultVoice.isEmpty()) {
+            preferred = matchingVoice(voices, model.defaultVoice);
+        }
+        if (preferred == null && !voices.isEmpty()) {
+            preferred = voices.get(0);
+        }
+        if (preferred != null) {
+            voiceEdit.setText(preferred);
+        }
+        setStatus("Discovered model " + model.id + " with " + voices.size() + " voice option(s).");
+        if (offerVoiceChoice && voices.size() > 1) {
+            showVoiceDialogForField(voices, voiceEdit);
+        }
+    }
+
+    private String matchingVoice(List<String> voices, String candidate) {
+        if (candidate == null || candidate.trim().isEmpty()) {
+            return null;
+        }
+        for (String voice : voices) {
+            if (candidate.equalsIgnoreCase(voice)) {
+                return voice;
+            }
+        }
+        return null;
+    }
+
+    private void showSavedEndpointProfiles(
+            EditText serverEdit,
+            EditText modelEdit,
+            EditText voiceEdit,
+            EditText formatEdit,
+            EditText langCodeEdit,
+            CheckBox streamBox) {
+        ArrayList<TtsEndpointProfileStore.Profile> profiles = TtsEndpointProfileStore.load(prefs);
+        if (profiles.isEmpty()) {
+            setStatus("No saved server profiles yet. Save settings once for each endpoint you use.");
+            toast("No saved servers yet");
+            return;
+        }
+        String[] items = new String[profiles.size()];
+        for (int i = 0; i < profiles.size(); i++) {
+            items[i] = profiles.get(i).label();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Saved TTS servers")
+                .setItems(items, (dialog, which) -> {
+                    TtsEndpointProfileStore.Profile profile = profiles.get(which);
+                    serverEdit.setText(profile.server);
+                    modelEdit.setText(profile.model);
+                    voiceEdit.setText(profile.voice);
+                    formatEdit.setText(profile.responseFormat);
+                    langCodeEdit.setText(profile.langCode);
+                    streamBox.setChecked(profile.stream);
+                    setStatus("Loaded settings for " + profile.server + ". Tap Discover Server to refresh options.");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void postIfActivityAlive(Runnable action) {
@@ -2315,33 +2510,6 @@ public class MainActivity extends Activity {
             baos.write(buffer, 0, Math.min(n, remaining));
         }
         return baos.toString("UTF-8");
-    }
-
-    private ArrayList<String> parseVoiceList(String body) throws Exception {
-        ArrayList<String> voices = new ArrayList<>();
-        JSONObject obj = new JSONObject(body);
-        JSONArray arr = obj.optJSONArray("voices");
-        if (arr == null) {
-            arr = obj.optJSONArray("data");
-        }
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                Object item = arr.get(i);
-                if (item instanceof String) {
-                    voices.add((String) item);
-                } else if (item instanceof JSONObject) {
-                    JSONObject v = (JSONObject) item;
-                    String id = v.optString("id", v.optString("name", ""));
-                    if (!id.isEmpty()) {
-                        voices.add(id);
-                    }
-                }
-            }
-        }
-        if (voices.isEmpty()) {
-            throw new IllegalStateException("No voices found in response: " + body);
-        }
-        return voices;
     }
 
     private void showVoiceDialogForField(ArrayList<String> voices, EditText voiceEdit) {

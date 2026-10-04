@@ -114,6 +114,28 @@ public class TtsConfigTest {
     }
 
     @Test
+    public void languageOverrideUsesGenericAndKokoroSpellings() throws Exception {
+        TtsConfig config = new TtsConfig(
+                "http://127.0.0.1:8880",
+                "model-a",
+                "voice-a",
+                1.0,
+                "wav",
+                false,
+                "English",
+                true,
+                false,
+                true,
+                true,
+                true,
+                true);
+
+        JSONObject payload = config.requestPayload("hello");
+        assertEquals("English", payload.getString("language"));
+        assertEquals("English", payload.getString("lang_code"));
+    }
+
+    @Test
     public void cacheIdentityChangesForMeaningfulSettingChanges() {
         TtsConfig base = TestFixtures.config("http://127.0.0.1:8880");
         TtsConfig otherVoice = new TtsConfig(

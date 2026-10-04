@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added endpoint-aware TTS discovery: Settings can query server models/voices, filters Wavhost registry entries to installed models, and keeps manual fields as a fallback.
+- Added saved per-server profiles so switching among concurrent Kokoro, qwentts, or Wavhost endpoints restores each endpoint's model, voice, format, stream, and language choices.
+- Made language overrides portable by sending both generic `language` and Kokoro-compatible `lang_code` fields.
+- Hardened the real-server preflight to verify that the configured model as well as voice is actually advertised by the endpoint.
+- Added a host-side real-TTS-server preflight that exercises the Android request contract, verifies advertised voices, retains generated audio, and validates WAV responses before device installation.
 - Added a pre-install JVM/Robolectric test suite for pagination, immutable TTS configuration, atomic storage, playback-document replacement, service restart semantics, and playback policy decisions.
 - Added loopback Kokoro integration tests for successful publication, cache reuse, concurrent request deduplication, active cancellation, truncated responses, and invalid cached audio.
 - Added a connected Android lifecycle test that serves valid WAV audio locally, recreates the activity during playback, and verifies service-owned auto-advance to the second page.

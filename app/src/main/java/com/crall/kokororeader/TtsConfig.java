@@ -7,7 +7,7 @@ import org.json.JSONObject;
 
 import java.util.Locale;
 
-/** Immutable Kokoro request settings captured when a playback document is started. */
+/** Immutable TTS request settings captured when a playback document is started. */
 final class TtsConfig {
     private static final String PREFS = "kokoro_reader_prefs";
 
@@ -135,6 +135,10 @@ final class TtsConfig {
         payload.put("speed", speed);
         payload.put("stream", stream);
         if (!langCode.isEmpty()) {
+            // Kokoro-FastAPI uses lang_code while Wavhost/qwentts-style
+            // OpenAI-compatible servers use language. Sending both keeps the
+            // request portable; servers ignore the spelling they do not use.
+            payload.put("language", langCode);
             payload.put("lang_code", langCode);
         }
         JSONObject normalizationOptions = new JSONObject();
