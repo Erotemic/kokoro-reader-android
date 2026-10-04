@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix endpoint-discovery JVM tests to run under Robolectric because the parser uses Android `org.json`, and make the real-server smoke test run multiple syntheses and reject obviously truncated/early-EOS WAV audio.
 - Added endpoint-aware TTS discovery: Settings can query server models/voices, filters Wavhost registry entries to installed models, and keeps manual fields as a fallback.
 - Added saved per-server profiles so switching among concurrent Kokoro, qwentts, or Wavhost endpoints restores each endpoint's model, voice, format, stream, and language choices.
 - Made language overrides portable by sending both generic `language` and Kokoro-compatible `lang_code` fields.

@@ -110,3 +110,12 @@ servers. `server_smoke_test.sh` proves the selected real backend accepts the
 Android request contract and returns playable-looking audio. Neither test proves
 that the phone can route to the server; for that final networking boundary, use
 the app's Settings -> Health Check or a connected-device test.
+
+### Real-server audio sanity
+
+For WAV responses, `server_smoke_test.sh` validates more than the RIFF header. It also
+runs three synthesis requests by default (configurable with `TTS_SMOKE_RUNS`) and
+requires a conservative minimum duration based on input length for each. This catches valid but
+obviously truncated/early-EOS responses (for example, a fraction of a second of audio
+for the default full-sentence smoke text) before a phone install.
+

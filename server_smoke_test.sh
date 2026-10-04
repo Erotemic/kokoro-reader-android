@@ -59,6 +59,13 @@ model = config("TTS_SMOKE_MODEL", "kokoro")
 voice = config("TTS_SMOKE_VOICE", "af_bella")
 response_format = config("TTS_SMOKE_FORMAT", "mp3").lower()
 lang_code = config("TTS_SMOKE_LANG_CODE", "")
+runs_raw = config("TTS_SMOKE_RUNS", "3")
+try:
+    runs = int(runs_raw)
+except ValueError as ex:
+    raise RuntimeError(f"TTS_SMOKE_RUNS must be a positive integer, got {runs_raw!r}") from ex
+if runs < 1:
+    raise RuntimeError(f"TTS_SMOKE_RUNS must be a positive integer, got {runs}")
 text = config(
     "TTS_SMOKE_TEXT",
     "This is a server compatibility test from the Android reader repository."
@@ -73,6 +80,7 @@ print(f"  model:  {model}")
 print(f"  voice:  {voice}")
 print(f"  format: {response_format}")
 print(f"  lang:   {lang_code or '[blank]'}")
+print(f"  runs:   {runs}")
 
 
 def request(path, method="GET", body=None, timeout=30):
@@ -206,38 +214,57 @@ if lang_code:
 out_dir = ROOT / "build" / "server-smoke"
 out_dir.mkdir(parents=True, exist_ok=True)
 ext = response_format if response_format in {"mp3", "wav", "aac", "flac", "opus"} else "bin"
-out_file = out_dir / f"last-response.{ext}"
 request_file = out_dir / "last-request.json"
 request_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf8")
 
-with request("/v1/audio/speech", method="POST", body=payload, timeout=180) as response:
-    content_type = response.headers.get("Content-Type", "")
-    data = response.read()
-    code = response.status
+run_files = []
+for run_index in range(1, runs + 1):
+    out_file = out_dir / f"run-{run_index:02d}.{ext}"
+    with request("/v1/audio/speech", method="POST", body=payload, timeout=180) as response:
+        content_type = response.headers.get("Content-Type", "")
+        data = response.read()
+        code = response.status
 
-if len(data) < 16:
-    raise RuntimeError(f"Speech endpoint returned only {len(data)} bytes")
-out_file.write_bytes(data)
-print(f"OK /v1/audio/speech: HTTP {code}, {len(data)} bytes, Content-Type={content_type or '[none]'}")
-
-if response_format == "wav":
-    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise RuntimeError("Configured WAV response is not a RIFF/WAVE file")
-    with wave.open(str(out_file), "rb") as wav:
-        channels = wav.getnchannels()
-        rate = wav.getframerate()
-        frames = wav.getnframes()
-        sample_width = wav.getsampwidth()
-        duration = frames / rate if rate else 0.0
-    if duration <= 0.05:
-        raise RuntimeError(f"Generated WAV is implausibly short: {duration:.3f}s")
+    if len(data) < 16:
+        raise RuntimeError(f"Speech run {run_index} returned only {len(data)} bytes")
+    out_file.write_bytes(data)
+    run_files.append(out_file)
     print(
-        "OK WAV: "
-        f"{channels} channel(s), {rate} Hz, {sample_width * 8}-bit, {duration:.2f}s"
+        f"OK /v1/audio/speech run {run_index}/{runs}: "
+        f"HTTP {code}, {len(data)} bytes, Content-Type={content_type or '[none]'}"
     )
+
+    if response_format == "wav":
+        if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+            raise RuntimeError(f"Speech run {run_index} is not a RIFF/WAVE file")
+        with wave.open(str(out_file), "rb") as wav:
+            channels = wav.getnchannels()
+            rate = wav.getframerate()
+            frames = wav.getnframes()
+            sample_width = wav.getsampwidth()
+            duration = frames / rate if rate else 0.0
+        # A syntactically valid WAV can still be a failed/early-EOS synthesis.
+        # Keep the threshold deliberately generous so normal fast speech passes,
+        # while responses such as 0.16 s for the default full sentence do not.
+        minimum_duration = max(0.5, min(5.0, len(text) / 80.0))
+        if duration < minimum_duration:
+            raise RuntimeError(
+                f"Generated WAV run {run_index} is implausibly short for {len(text)} input characters: "
+                f"{duration:.3f}s < {minimum_duration:.3f}s minimum. "
+                f"Inspect {out_file}."
+            )
+        print(
+            f"OK WAV run {run_index}/{runs}: "
+            f"{channels} channel(s), {rate} Hz, {sample_width * 8}-bit, {duration:.2f}s"
+        )
+
+# Keep the old convenience name pointing at the final successful response.
+last_response = out_dir / f"last-response.{ext}"
+last_response.write_bytes(run_files[-1].read_bytes())
 
 print()
 print("PASS: server satisfies the Android reader's HTTP/audio preflight.")
 print(f"  request: {request_file}")
-print(f"  audio:   {out_file}")
+print(f"  audio:   {last_response}")
+print(f"  runs:    {out_dir / ('run-01.' + ext)} ... {run_files[-1]}")
 PY
