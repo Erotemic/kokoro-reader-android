@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reworked TTS endpoint settings into named profiles that remember the complete request contract: server URL, model, voice, TTS speed, response format, stream flag, language, and normalization options. Multiple profiles may point at the same server.
+- Added profile switching, Save As, update-on-save, and delete controls; legacy per-server history migrates automatically into named profiles.
+- Reorganized the Settings dialog into clearer endpoint, request, normalization, playback, chunk/history, and maintenance sections.
+- Settings Cancel/back now warns before discarding unsaved edits, and tapping outside no longer silently closes the dialog.
+- Improved generation/playback errors to include endpoint/model/voice/format context so incompatible endpoint formats are diagnosable without guesswork.
 - Fix endpoint-discovery JVM tests to run under Robolectric because the parser uses Android `org.json`, and make the real-server smoke test run multiple syntheses and reject obviously truncated/early-EOS WAV audio.
 - Added endpoint-aware TTS discovery: Settings can query server models/voices, filters Wavhost registry entries to installed models, and keeps manual fields as a fallback.
 - Added saved per-server profiles so switching among concurrent Kokoro, qwentts, or Wavhost endpoints restores each endpoint's model, voice, format, stream, and language choices.

@@ -24,7 +24,10 @@ See `docs/TESTING.md` for exact automated coverage. Use the remaining checklist 
 ## Settings and configuration snapshots
 
 - Confirm the default server URL is `http://10.0.2.2:8880` unless overridden by local build configuration.
-- Health Check succeeds against a running Kokoro server and reports a clear error for a bad endpoint.
+- Reachability succeeds against a running TTS server and reports a clear error for a bad endpoint.
+- Speech Test succeeds only when the currently edited server/model/voice/format combination both synthesizes and decodes through Android `MediaPlayer`; verify Kokoro `mp3` and the qwentts-compatible format independently.
+- Edit a Settings field, press Cancel and Back separately, and verify each path warns before discarding.
+- Save two named TTS profiles (for example Kokoro `:8880` / `mp3` and qwentts `:11436` / `wav`), switch between them, and verify the whole endpoint request contract is restored.
 - Fetch Voices populates the voice selector.
 - Confirm response formats are limited to `mp3`, `opus`, `aac`, `flac`, and `wav`.
 - Start a multi-page document, then change voice/server/speed/format while it plays; confirm the active queue keeps its original settings and a newly started document uses the new settings.

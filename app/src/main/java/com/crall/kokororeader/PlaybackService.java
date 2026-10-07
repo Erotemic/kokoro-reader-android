@@ -494,15 +494,24 @@ public class PlaybackService extends Service {
             });
             next.setOnErrorListener((mediaPlayer, what, extra) -> {
                 if (mediaPlayer == player) {
-                    fail("Playback error: what=" + what + " extra=" + extra + ".");
+                    fail("Playback error: what=" + what + " extra=" + extra + ". "
+                            + playbackCompatibilityHint());
                 }
                 return true;
             });
             player = next;
             next.prepareAsync();
         } catch (Exception ex) {
-            fail("Could not play audio: " + ex.getMessage());
+            fail("Could not play audio: " + ex.getMessage() + ". " + playbackCompatibilityHint());
         }
+    }
+
+    private String playbackCompatibilityHint() {
+        if (ttsConfig == null) {
+            return "Check the selected TTS endpoint profile and audio format.";
+        }
+        return "TTS: " + ttsConfig.endpointSummary()
+                + ". If generation succeeds but playback fails, try a different saved audio format for this endpoint.";
     }
 
     private void startPreparedPlayer() {

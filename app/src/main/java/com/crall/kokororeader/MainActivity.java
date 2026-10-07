@@ -12,12 +12,14 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -59,6 +61,7 @@ public class MainActivity extends Activity {
     private static final int SAFE_MAX_CHARS = 1200;
     private static final int DEFAULT_AUTO_NEXT_DELAY_MS = 650;
     private static final int MAX_AUTO_NEXT_DELAY_MS = 5000;
+    private static final String ACTIVE_TTS_PROFILE_KEY = "activeTtsProfileName";
 
     private TextView statusView;
     private TextView pageLabel;
@@ -1250,10 +1253,12 @@ public class MainActivity extends Activity {
             return;
         }
         TtsConfig displayConfig = getEffectiveTtsConfig();
+        String activeProfile = prefString(ACTIVE_TTS_PROFILE_KEY, "").trim();
+        String endpointLabel = activeProfile.isEmpty() ? displayConfig.serverBase : activeProfile;
         if (pages.isEmpty()) {
             pageLabel.setText("No pages yet");
-            cacheLabel.setText("Server: " + displayConfig.serverBase + "  Voice: "
-                    + displayConfig.voice + " • " + getTrackBuildStatusLabel());
+            cacheLabel.setText("TTS: " + endpointLabel + " • " + displayConfig.voice + " • "
+                    + displayConfig.responseFormat + " • " + getTrackBuildStatusLabel());
             pageSeek.setMax(0);
             pageSeek.setProgress(0);
             if (playbackSeek != null && !playbackSeekUserTouch) {
@@ -1271,7 +1276,8 @@ public class MainActivity extends Activity {
         pageLabel.setText(String.format(Locale.US, "Page %d / %d", currentPage + 1, pages.size()));
         cacheLabel.setText(String.format(
                 Locale.US,
-                "%s • %,d chars • %s • %s @ %.2fx • %s",
+                "%s • %s • %,d chars • %s • %s @ %.2fx • %s",
+                endpointLabel,
                 cachedText,
                 text.length(),
                 displayConfig.voice,
@@ -2035,6 +2041,108 @@ public class MainActivity extends Activity {
         });
     }
 
+    private final class SettingsDialogControls {
+        final EditText serverEdit;
+        final EditText modelEdit;
+        final EditText voiceEdit;
+        final EditText speedEdit;
+        final EditText playbackRateEdit;
+        final EditText formatEdit;
+        final EditText langCodeEdit;
+        final EditText maxCharsEdit;
+        final EditText historyLimitEdit;
+        final EditText autoNextDelayEdit;
+        final EditText prefetchEdit;
+        final CheckBox darkModeBox;
+        final CheckBox streamBox;
+        final CheckBox autoNextBox;
+        final CheckBox wholeTextProgressBox;
+        final CheckBox autoRestoreBox;
+        final CheckBox normalizeBox;
+        final CheckBox unitNormBox;
+        final CheckBox urlNormBox;
+        final CheckBox emailNormBox;
+        final CheckBox pluralNormBox;
+        final CheckBox phoneNormBox;
+
+        SettingsDialogControls(
+                EditText serverEdit,
+                EditText modelEdit,
+                EditText voiceEdit,
+                EditText speedEdit,
+                EditText playbackRateEdit,
+                EditText formatEdit,
+                EditText langCodeEdit,
+                EditText maxCharsEdit,
+                EditText historyLimitEdit,
+                EditText autoNextDelayEdit,
+                EditText prefetchEdit,
+                CheckBox darkModeBox,
+                CheckBox streamBox,
+                CheckBox autoNextBox,
+                CheckBox wholeTextProgressBox,
+                CheckBox autoRestoreBox,
+                CheckBox normalizeBox,
+                CheckBox unitNormBox,
+                CheckBox urlNormBox,
+                CheckBox emailNormBox,
+                CheckBox pluralNormBox,
+                CheckBox phoneNormBox) {
+            this.serverEdit = serverEdit;
+            this.modelEdit = modelEdit;
+            this.voiceEdit = voiceEdit;
+            this.speedEdit = speedEdit;
+            this.playbackRateEdit = playbackRateEdit;
+            this.formatEdit = formatEdit;
+            this.langCodeEdit = langCodeEdit;
+            this.maxCharsEdit = maxCharsEdit;
+            this.historyLimitEdit = historyLimitEdit;
+            this.autoNextDelayEdit = autoNextDelayEdit;
+            this.prefetchEdit = prefetchEdit;
+            this.darkModeBox = darkModeBox;
+            this.streamBox = streamBox;
+            this.autoNextBox = autoNextBox;
+            this.wholeTextProgressBox = wholeTextProgressBox;
+            this.autoRestoreBox = autoRestoreBox;
+            this.normalizeBox = normalizeBox;
+            this.unitNormBox = unitNormBox;
+            this.urlNormBox = urlNormBox;
+            this.emailNormBox = emailNormBox;
+            this.pluralNormBox = pluralNormBox;
+            this.phoneNormBox = phoneNormBox;
+        }
+
+        String fingerprint(String activeProfileName) {
+            return value(activeProfileName)
+                    + "\nserver=" + value(serverEdit.getText().toString())
+                    + "\nmodel=" + value(modelEdit.getText().toString())
+                    + "\nvoice=" + value(voiceEdit.getText().toString())
+                    + "\nspeed=" + value(speedEdit.getText().toString())
+                    + "\nplaybackRate=" + value(playbackRateEdit.getText().toString())
+                    + "\nformat=" + value(formatEdit.getText().toString())
+                    + "\nlang=" + value(langCodeEdit.getText().toString())
+                    + "\nmaxChars=" + value(maxCharsEdit.getText().toString())
+                    + "\nhistoryLimit=" + value(historyLimitEdit.getText().toString())
+                    + "\nautoNextDelay=" + value(autoNextDelayEdit.getText().toString())
+                    + "\nprefetch=" + value(prefetchEdit.getText().toString())
+                    + "\ndark=" + darkModeBox.isChecked()
+                    + "\nstream=" + streamBox.isChecked()
+                    + "\nautoNext=" + autoNextBox.isChecked()
+                    + "\nwholeTextProgress=" + wholeTextProgressBox.isChecked()
+                    + "\nautoRestore=" + autoRestoreBox.isChecked()
+                    + "\nnormalize=" + normalizeBox.isChecked()
+                    + "\nunit=" + unitNormBox.isChecked()
+                    + "\nurl=" + urlNormBox.isChecked()
+                    + "\nemail=" + emailNormBox.isChecked()
+                    + "\nplural=" + pluralNormBox.isChecked()
+                    + "\nphone=" + phoneNormBox.isChecked();
+        }
+
+        private String value(String value) {
+            return value == null ? "" : value.trim();
+        }
+    }
+
     private void showSettingsDialog() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -2044,19 +2152,36 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("Kokoro Reader Settings");
+        title.setText("Reader Settings");
         title.setTextSize(22);
-        title.setPadding(0, 0, 0, dp(8));
+        title.setPadding(0, 0, 0, dp(4));
         root.addView(title, matchWrap());
 
+        TextView intro = new TextView(this);
+        intro.setText("TTS endpoint settings can be saved as profiles so server, model, voice, format, and compatibility options switch together.");
+        intro.setTextSize(13);
+        intro.setPadding(0, 0, 0, dp(8));
+        root.addView(intro, matchWrap());
+
+        addSettingsSection(root, "TTS endpoint profile");
+        TextView profileStatus = new TextView(this);
+        profileStatus.setTextSize(14);
+        profileStatus.setPadding(dp(4), dp(4), dp(4), dp(4));
+        root.addView(profileStatus, matchWrap());
+        LinearLayout profileButtons = row(root);
+        Button profilesButton = addDialogButton(profileButtons, "Profiles", 1);
+        Button saveProfileButton = addDialogButton(profileButtons, "Save As", 1);
+        Button deleteProfileButton = addDialogButton(profileButtons, "Delete", 1);
+
+        addSettingsSection(root, "Server and model");
         addLabel(root, "Server URL");
         EditText serverEdit = addDialogEdit(root, getServerBase(), true, 1);
         serverEdit.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
 
         LinearLayout serverButtons = row(root);
-        Button discoverButton = addDialogButton(serverButtons, "Discover Server", 1);
-        Button savedServersButton = addDialogButton(serverButtons, "Saved Servers", 1);
-        Button healthButton = addDialogButton(serverButtons, "Health Check", 1);
+        Button discoverButton = addDialogButton(serverButtons, "Discover", 1);
+        Button healthButton = addDialogButton(serverButtons, "Reachability", 1);
+        Button speechTestButton = addDialogButton(serverButtons, "Speech Test", 1);
 
         LinearLayout row1 = row(root);
         LinearLayout modelCol = col(row1, 1);
@@ -2070,47 +2195,33 @@ public class MainActivity extends Activity {
         Button fetchVoicesButton = addDialogButton(voiceButtons, "Fetch Voices", 1);
         Button clearCacheButton = addDialogButton(voiceButtons, "Clear Audio Cache", 1);
 
+        addSettingsSection(root, "TTS request");
         LinearLayout row2 = row(root);
         LinearLayout speedCol = col(row2, 1);
         addLabel(speedCol, "TTS speed");
         EditText speedEdit = addDialogEdit(speedCol, prefString("speed", "1.0"), true, 1);
         speedEdit.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        LinearLayout playbackCol = col(row2, 1);
-        addLabel(playbackCol, "Phone playback rate");
-        EditText playbackRateEdit = addDialogEdit(playbackCol, prefString("playbackRate", "1.0"), true, 1);
-        playbackRateEdit.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-
-        LinearLayout row3 = row(root);
-        LinearLayout formatCol = col(row3, 1);
-        addLabel(formatCol, "Format (mp3, opus, aac, flac, wav)");
+        LinearLayout formatCol = col(row2, 1);
+        addLabel(formatCol, "Audio format");
         EditText formatEdit = addDialogEdit(formatCol, getResponseFormat(), true, 1);
-        LinearLayout langCol = col(row3, 1);
-        addLabel(langCol, "Language code, blank = auto");
-        EditText langCodeEdit = addDialogEdit(langCol, getLangCode(), true, 1);
 
-        LinearLayout row4 = row(root);
-        LinearLayout charsCol = col(row4, 1);
-        addLabel(charsCol, "Chars per page/chunk (safe cap " + SAFE_MAX_CHARS + ")");
-        EditText maxCharsEdit = addDialogEdit(charsCol, String.valueOf(getMaxChars()), true, 1);
-        maxCharsEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        LinearLayout historyCol = col(row4, 1);
-        addLabel(historyCol, "History sessions to keep");
-        EditText historyLimitEdit = addDialogEdit(historyCol, prefString("historyLimit", "20"), true, 1);
-        historyLimitEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-
-        CheckBox darkModeBox = addDialogCheck(root, "Dark mode", prefBool("darkMode", true));
+        addLabel(root, "Language code, blank = auto");
+        EditText langCodeEdit = addDialogEdit(root, getLangCode(), true, 1);
         CheckBox streamBox = addDialogCheck(root, "Ask server to stream response", prefBool("stream", true));
-        CheckBox autoNextBox = addDialogCheck(root, "Auto-generate/play next page", prefBool("autoNext", true));
-        addLabel(root, "Pause before auto-next, milliseconds");
-        EditText autoNextDelayEdit = addDialogEdit(root, String.valueOf(getAutoNextDelayMs()), true, 1);
-        autoNextDelayEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        addLabel(root, "Pages to prefetch ahead while playing");
-        EditText prefetchEdit = addDialogEdit(root, prefString("prefetchPages", "5"), true, 1);
-        prefetchEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        CheckBox wholeTextProgressBox = addDialogCheck(root, "Playback bar tracks entire text", prefBool("wholeTextProgress", true));
-        CheckBox autoRestoreBox = addDialogCheck(root, "Auto-load last text/session at startup", prefBool("autoRestore", true));
+        TextView formatHint = new TextView(this);
+        formatHint.setText("Known compatibility: Kokoro-FastAPI works well with mp3; qwentts.cpp currently uses wav for Android playback. Save these choices in separate profiles.");
+        formatHint.setTextSize(12);
+        formatHint.setPadding(dp(4), 0, dp(4), dp(6));
+        root.addView(formatHint, matchWrap());
+        LinearLayout formatButtons = row(root);
+        Button mp3Button = addDialogButton(formatButtons, "Use MP3", 1);
+        Button wavButton = addDialogButton(formatButtons, "Use WAV", 1);
 
-        addLabel(root, "Kokoro-compatible normalization options (ignored by other servers)");
+        addSettingsSection(root, "Kokoro normalization");
+        TextView normalizeHint = new TextView(this);
+        normalizeHint.setText("These options are endpoint-specific and are remembered in TTS profiles. Other servers may ignore them.");
+        normalizeHint.setTextSize(12);
+        root.addView(normalizeHint, matchWrap());
         CheckBox normalizeBox = addDialogCheck(root, "normalize", prefBool("normalize", true));
         CheckBox unitNormBox = addDialogCheck(root, "unit normalization", prefBool("unitNorm", false));
         CheckBox urlNormBox = addDialogCheck(root, "URL normalization", prefBool("urlNorm", true));
@@ -2118,6 +2229,33 @@ public class MainActivity extends Activity {
         CheckBox pluralNormBox = addDialogCheck(root, "optional pluralization normalization", prefBool("pluralNorm", true));
         CheckBox phoneNormBox = addDialogCheck(root, "phone normalization", prefBool("phoneNorm", true));
 
+        addSettingsSection(root, "Playback");
+        addLabel(root, "Phone playback rate");
+        EditText playbackRateEdit = addDialogEdit(root, prefString("playbackRate", "1.0"), true, 1);
+        playbackRateEdit.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        CheckBox autoNextBox = addDialogCheck(root, "Auto-generate/play next page", prefBool("autoNext", true));
+        addLabel(root, "Pause before auto-next, milliseconds");
+        EditText autoNextDelayEdit = addDialogEdit(root, String.valueOf(getAutoNextDelayMs()), true, 1);
+        autoNextDelayEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        CheckBox wholeTextProgressBox = addDialogCheck(root, "Playback bar tracks entire text", prefBool("wholeTextProgress", true));
+
+        addSettingsSection(root, "Chunking and history");
+        LinearLayout row4 = row(root);
+        LinearLayout charsCol = col(row4, 1);
+        addLabel(charsCol, "Chars per chunk (safe cap " + SAFE_MAX_CHARS + ")");
+        EditText maxCharsEdit = addDialogEdit(charsCol, String.valueOf(getMaxChars()), true, 1);
+        maxCharsEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        LinearLayout historyCol = col(row4, 1);
+        addLabel(historyCol, "History sessions");
+        EditText historyLimitEdit = addDialogEdit(historyCol, prefString("historyLimit", "20"), true, 1);
+        historyLimitEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        addLabel(root, "Pages to prefetch ahead while playing");
+        EditText prefetchEdit = addDialogEdit(root, prefString("prefetchPages", "5"), true, 1);
+        prefetchEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        CheckBox autoRestoreBox = addDialogCheck(root, "Auto-load last text/session at startup", prefBool("autoRestore", true));
+
+        addSettingsSection(root, "Appearance and maintenance");
+        CheckBox darkModeBox = addDialogCheck(root, "Dark mode", prefBool("darkMode", true));
         LinearLayout sessionButtons = row(root);
         Button loadButton = addDialogButton(sessionButtons, "Load Last Session", 1);
         Button historyDialogButton = addDialogButton(sessionButtons, "History", 1);
@@ -2127,11 +2265,52 @@ public class MainActivity extends Activity {
 
         addBuildInfoSection(root);
 
+        SettingsDialogControls controls = new SettingsDialogControls(
+                serverEdit,
+                modelEdit,
+                voiceEdit,
+                speedEdit,
+                playbackRateEdit,
+                formatEdit,
+                langCodeEdit,
+                maxCharsEdit,
+                historyLimitEdit,
+                autoNextDelayEdit,
+                prefetchEdit,
+                darkModeBox,
+                streamBox,
+                autoNextBox,
+                wholeTextProgressBox,
+                autoRestoreBox,
+                normalizeBox,
+                unitNormBox,
+                urlNormBox,
+                emailNormBox,
+                pluralNormBox,
+                phoneNormBox);
+
+        String[] activeProfileName = new String[]{prefString(ACTIVE_TTS_PROFILE_KEY, "").trim()};
+        if (TtsEndpointProfileStore.findByName(prefs, activeProfileName[0]) == null) {
+            TtsEndpointProfileStore.Profile matching = TtsEndpointProfileStore.findMatching(
+                    prefs, profileFromControls("", controls));
+            activeProfileName[0] = matching == null ? "" : matching.name;
+        }
+        updateProfileStatus(profileStatus, deleteProfileButton, activeProfileName[0]);
+        String initialFingerprint = controls.fingerprint(activeProfileName[0]);
+
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setView(scroll)
                 .setPositiveButton("Save", null)
-                .setNegativeButton("Close", null)
+                .setNegativeButton("Cancel", null)
                 .create();
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+                maybeDiscardSettings(dialog, controls, initialFingerprint, activeProfileName[0]);
+                return true;
+            }
+            return false;
+        });
 
         dialog.setOnShowListener(d -> {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
@@ -2143,6 +2322,16 @@ public class MainActivity extends Activity {
                 String savedFormat = TtsConfig.normalizeResponseFormat(formatEdit.getText().toString());
                 String savedLang = langCodeEdit.getText().toString().trim();
                 boolean savedStream = streamBox.isChecked();
+
+                String profileName = activeProfileName[0];
+                TtsEndpointProfileStore.Profile candidate = profileFromControls(profileName, controls);
+                if (profileName.isEmpty()) {
+                    profileName = uniqueProfileName(TtsEndpointProfileStore.suggestName(savedServer, savedModel), candidate);
+                    activeProfileName[0] = profileName;
+                    candidate = profileFromControls(profileName, controls);
+                }
+                TtsEndpointProfileStore.remember(prefs, candidate);
+
                 prefs.edit()
                         .putString("server", savedServer)
                         .putString("model", savedModel)
@@ -2155,6 +2344,7 @@ public class MainActivity extends Activity {
                         .putString("historyLimit", historyLimitEdit.getText().toString().trim())
                         .putString("autoNextDelayMs", autoNextDelayEdit.getText().toString().trim())
                         .putString("prefetchPages", prefetchEdit.getText().toString().trim())
+                        .putString(ACTIVE_TTS_PROFILE_KEY, activeProfileName[0])
                         .putBoolean("darkMode", darkModeBox.isChecked())
                         .putBoolean("stream", savedStream)
                         .putBoolean("autoNext", autoNextBox.isChecked())
@@ -2167,15 +2357,7 @@ public class MainActivity extends Activity {
                         .putBoolean("pluralNorm", pluralNormBox.isChecked())
                         .putBoolean("phoneNorm", phoneNormBox.isChecked())
                         .apply();
-                TtsEndpointProfileStore.remember(
-                        prefs,
-                        new TtsEndpointProfileStore.Profile(
-                                savedServer,
-                                savedModel,
-                                savedVoice,
-                                savedFormat,
-                                savedStream,
-                                savedLang));
+
                 boolean playbackActive = hasActiveOrPendingPlayback();
                 boolean pageSizeChanged = previousMaxChars != getMaxChars();
                 if (playbackActive && pageSizeChanged) {
@@ -2205,16 +2387,25 @@ public class MainActivity extends Activity {
                 updatePlaybackProgress();
                 saveSession();
                 setStatus(playbackActive
-                        ? "Settings saved. TTS and pagination changes apply when you start a new playback run."
-                        : "Settings saved.");
+                        ? "Settings saved as profile '" + activeProfileName[0] + "'. TTS and pagination changes apply when you start a new playback run."
+                        : "Settings saved as profile '" + activeProfileName[0] + "'.");
                 dialog.dismiss();
             });
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v ->
+                    maybeDiscardSettings(dialog, controls, initialFingerprint, activeProfileName[0]));
         });
 
+        profilesButton.setOnClickListener(v -> showSavedEndpointProfiles(
+                controls, activeProfileName, profileStatus, deleteProfileButton));
+        saveProfileButton.setOnClickListener(v -> promptSaveEndpointProfile(
+                controls, activeProfileName, profileStatus, deleteProfileButton));
+        deleteProfileButton.setOnClickListener(v -> confirmDeleteEndpointProfile(
+                activeProfileName, profileStatus, deleteProfileButton));
         discoverButton.setOnClickListener(v -> discoverEndpointIntoFields(serverEdit, modelEdit, voiceEdit));
-        savedServersButton.setOnClickListener(v -> showSavedEndpointProfiles(
-                serverEdit, modelEdit, voiceEdit, formatEdit, langCodeEdit, streamBox));
         healthButton.setOnClickListener(v -> healthCheckServer(serverEdit));
+        speechTestButton.setOnClickListener(v -> testSpeechSettings(controls));
+        mp3Button.setOnClickListener(v -> formatEdit.setText("mp3"));
+        wavButton.setOnClickListener(v -> formatEdit.setText("wav"));
         fetchVoicesButton.setOnClickListener(v -> fetchVoicesIntoField(serverEdit, modelEdit, voiceEdit));
         clearCacheButton.setOnClickListener(v -> clearAudioCache());
         loadButton.setOnClickListener(v -> restoreLastSession(false));
@@ -2224,6 +2415,228 @@ public class MainActivity extends Activity {
 
         dialog.show();
         applyThemeToTree(scroll);
+    }
+
+    private TtsEndpointProfileStore.Profile profileFromControls(
+            String name, SettingsDialogControls controls) {
+        return new TtsEndpointProfileStore.Profile(
+                name,
+                normalizeServer(controls.serverEdit.getText().toString()),
+                controls.modelEdit.getText().toString().trim(),
+                controls.voiceEdit.getText().toString().trim(),
+                controls.speedEdit.getText().toString().trim(),
+                TtsConfig.normalizeResponseFormat(controls.formatEdit.getText().toString()),
+                controls.streamBox.isChecked(),
+                controls.langCodeEdit.getText().toString().trim(),
+                controls.normalizeBox.isChecked(),
+                controls.unitNormBox.isChecked(),
+                controls.urlNormBox.isChecked(),
+                controls.emailNormBox.isChecked(),
+                controls.pluralNormBox.isChecked(),
+                controls.phoneNormBox.isChecked());
+    }
+
+    private TtsConfig ttsConfigFromControls(SettingsDialogControls controls) {
+        return new TtsConfig(
+                controls.serverEdit.getText().toString(),
+                controls.modelEdit.getText().toString(),
+                controls.voiceEdit.getText().toString(),
+                parseDoubleOrDefault(controls.speedEdit.getText().toString(), 1.0),
+                controls.formatEdit.getText().toString(),
+                controls.streamBox.isChecked(),
+                controls.langCodeEdit.getText().toString(),
+                controls.normalizeBox.isChecked(),
+                controls.unitNormBox.isChecked(),
+                controls.urlNormBox.isChecked(),
+                controls.emailNormBox.isChecked(),
+                controls.pluralNormBox.isChecked(),
+                controls.phoneNormBox.isChecked());
+    }
+
+    private double parseDoubleOrDefault(String value, double fallback) {
+        try {
+            double parsed = Double.parseDouble(value == null ? "" : value.trim());
+            return Double.isFinite(parsed) ? parsed : fallback;
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private void applyProfileToControls(
+            TtsEndpointProfileStore.Profile profile,
+            SettingsDialogControls controls) {
+        controls.serverEdit.setText(profile.server);
+        controls.modelEdit.setText(profile.model);
+        controls.voiceEdit.setText(profile.voice);
+        controls.speedEdit.setText(profile.speed);
+        controls.formatEdit.setText(profile.responseFormat);
+        controls.streamBox.setChecked(profile.stream);
+        controls.langCodeEdit.setText(profile.langCode);
+        controls.normalizeBox.setChecked(profile.normalize);
+        controls.unitNormBox.setChecked(profile.unitNormalization);
+        controls.urlNormBox.setChecked(profile.urlNormalization);
+        controls.emailNormBox.setChecked(profile.emailNormalization);
+        controls.pluralNormBox.setChecked(profile.pluralNormalization);
+        controls.phoneNormBox.setChecked(profile.phoneNormalization);
+    }
+
+    private void updateProfileStatus(TextView view, Button deleteButton, String name) {
+        String clean = name == null ? "" : name.trim();
+        if (clean.isEmpty()) {
+            view.setText("No named profile selected. Saving settings will create one automatically.");
+            deleteButton.setEnabled(false);
+        } else {
+            view.setText("Active profile: " + clean + "\nEdits to TTS fields update this profile when Settings is saved.");
+            deleteButton.setEnabled(true);
+        }
+    }
+
+    private String uniqueProfileName(String requested, TtsEndpointProfileStore.Profile candidate) {
+        String base = requested == null || requested.trim().isEmpty() ? "TTS endpoint" : requested.trim();
+        TtsEndpointProfileStore.Profile existing = TtsEndpointProfileStore.findByName(prefs, base);
+        if (existing == null || existing.sameRequestSettings(candidate)) {
+            return base;
+        }
+        for (int i = 2; i < 100; i++) {
+            String trial = base + " " + i;
+            existing = TtsEndpointProfileStore.findByName(prefs, trial);
+            if (existing == null || existing.sameRequestSettings(candidate)) {
+                return trial;
+            }
+        }
+        return base + " copy";
+    }
+
+    private void promptSaveEndpointProfile(
+            SettingsDialogControls controls,
+            String[] activeProfileName,
+            TextView profileStatus,
+            Button deleteProfileButton) {
+        EditText nameEdit = new EditText(this);
+        String proposed = activeProfileName[0].trim();
+        if (proposed.isEmpty()) {
+            proposed = TtsEndpointProfileStore.suggestName(
+                    controls.serverEdit.getText().toString(), controls.modelEdit.getText().toString());
+        }
+        nameEdit.setText(proposed);
+        nameEdit.setSingleLine(true);
+        nameEdit.setSelectAllOnFocus(true);
+        int pad = dp(18);
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setPadding(pad, dp(6), pad, 0);
+        wrapper.addView(nameEdit, matchWrap());
+        new AlertDialog.Builder(this)
+                .setTitle("Save TTS profile")
+                .setMessage("Profiles remember the endpoint-specific request contract, including audio format and normalization settings.")
+                .setView(wrapper)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String name = nameEdit.getText().toString().trim();
+                    if (name.isEmpty()) {
+                        name = TtsEndpointProfileStore.suggestName(
+                                controls.serverEdit.getText().toString(), controls.modelEdit.getText().toString());
+                    }
+                    TtsEndpointProfileStore.Profile candidate = profileFromControls(name, controls);
+                    String unique = uniqueProfileName(name, candidate);
+                    candidate = profileFromControls(unique, controls);
+                    TtsEndpointProfileStore.remember(prefs, candidate);
+                    activeProfileName[0] = candidate.name;
+                    updateProfileStatus(profileStatus, deleteProfileButton, activeProfileName[0]);
+                    setStatus("Saved TTS profile '" + candidate.name + "'. Tap Save in Settings to make it active.");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmDeleteEndpointProfile(
+            String[] activeProfileName,
+            TextView profileStatus,
+            Button deleteProfileButton) {
+        String name = activeProfileName[0].trim();
+        if (name.isEmpty()) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Delete TTS profile?")
+                .setMessage("Delete '" + name + "'? The fields currently shown in Settings are not changed.")
+                .setPositiveButton("Delete", (dialog, which) -> {
+                    TtsEndpointProfileStore.delete(prefs, name);
+                    if (name.equalsIgnoreCase(prefString(ACTIVE_TTS_PROFILE_KEY, "").trim())) {
+                        prefs.edit().remove(ACTIVE_TTS_PROFILE_KEY).apply();
+                    }
+                    activeProfileName[0] = "";
+                    updateProfileStatus(profileStatus, deleteProfileButton, "");
+                    setStatus("Deleted TTS profile '" + name + "'.");
+                })
+                .setNegativeButton("Keep", null)
+                .show();
+    }
+
+    private void maybeDiscardSettings(
+            AlertDialog settingsDialog,
+            SettingsDialogControls controls,
+            String initialFingerprint,
+            String activeProfileName) {
+        if (initialFingerprint.equals(controls.fingerprint(activeProfileName))) {
+            settingsDialog.dismiss();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Discard unsaved settings?")
+                .setMessage("Changes in this Settings window have not been applied. Profiles you explicitly saved or deleted are already stored.")
+                .setPositiveButton("Discard", (dialog, which) -> settingsDialog.dismiss())
+                .setNegativeButton("Keep Editing", null)
+                .show();
+    }
+
+    private void testSpeechSettings(SettingsDialogControls controls) {
+        TtsConfig config = ttsConfigFromControls(controls);
+        String sample = "This is a test of the selected text to speech profile.";
+        setStatus("Testing synthesis and Android decoding: " + config.endpointSummary());
+        executor.submit(() -> {
+            File output = null;
+            MediaPlayer probe = null;
+            try {
+                int probePage = 999999;
+                output = KokoroAudioRepository.cacheFile(this, config, probePage, sample);
+                if (output.exists() && !output.delete()) {
+                    throw new IllegalStateException("Could not clear the previous speech-test audio file.");
+                }
+                output = KokoroAudioRepository.requestSpeech(
+                        this,
+                        config,
+                        0,
+                        "",
+                        probePage,
+                        sample,
+                        activityUtilityNetworkScope,
+                        null);
+                probe = new MediaPlayer();
+                probe.setDataSource(output.getAbsolutePath());
+                probe.prepare();
+                int durationMs = probe.getDuration();
+                String message = "Speech test OK: generated and Android decoded "
+                        + config.responseFormat + " (" + durationMs + " ms).";
+                postIfActivityAlive(() -> {
+                    setStatus(message);
+                    toast("Speech test OK");
+                });
+            } catch (InterruptedException ignored) {
+                // Activity teardown or cancellation is expected.
+            } catch (Exception ex) {
+                String message = "Speech test failed (" + config.endpointSummary() + "): " + ex.getMessage();
+                postIfActivityAlive(() -> {
+                    setStatus(message);
+                    toast("Speech test failed");
+                });
+            } finally {
+                if (probe != null) {
+                    try {
+                        probe.release();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        });
     }
 
     private void healthCheckServer(EditText serverEdit) {
@@ -2251,10 +2664,11 @@ public class MainActivity extends Activity {
                         if (snippet.length() > 160) {
                             snippet = snippet.substring(0, 160) + "...";
                         }
-                        final String message = "Health OK: HTTP " + code + " " + path + " - " + snippet;
+                        final String message = "Reachability OK: HTTP " + code + " " + path + " - " + snippet
+                                + ". Use Speech Test to verify synthesis and Android audio decoding.";
                         postIfActivityAlive(() -> {
                             setStatus(message);
-                            toast("TTS health check OK");
+                            toast("TTS endpoint reachable");
                         });
                         return;
                     }
@@ -2268,10 +2682,10 @@ public class MainActivity extends Activity {
                     }
                 }
             }
-            final String message = "Health check failed: " + lastError;
+            final String message = "Reachability check failed: " + lastError;
             postIfActivityAlive(() -> {
                 setStatus(message);
-                toast("TTS health check failed");
+                toast("TTS endpoint unreachable");
             });
         });
     }
@@ -2451,16 +2865,14 @@ public class MainActivity extends Activity {
     }
 
     private void showSavedEndpointProfiles(
-            EditText serverEdit,
-            EditText modelEdit,
-            EditText voiceEdit,
-            EditText formatEdit,
-            EditText langCodeEdit,
-            CheckBox streamBox) {
+            SettingsDialogControls controls,
+            String[] activeProfileName,
+            TextView profileStatus,
+            Button deleteProfileButton) {
         ArrayList<TtsEndpointProfileStore.Profile> profiles = TtsEndpointProfileStore.load(prefs);
         if (profiles.isEmpty()) {
-            setStatus("No saved server profiles yet. Save settings once for each endpoint you use.");
-            toast("No saved servers yet");
+            setStatus("No saved TTS profiles yet. Save Settings once or use Save As.");
+            toast("No saved TTS profiles yet");
             return;
         }
         String[] items = new String[profiles.size()];
@@ -2468,16 +2880,13 @@ public class MainActivity extends Activity {
             items[i] = profiles.get(i).label();
         }
         new AlertDialog.Builder(this)
-                .setTitle("Saved TTS servers")
+                .setTitle("TTS profiles")
                 .setItems(items, (dialog, which) -> {
                     TtsEndpointProfileStore.Profile profile = profiles.get(which);
-                    serverEdit.setText(profile.server);
-                    modelEdit.setText(profile.model);
-                    voiceEdit.setText(profile.voice);
-                    formatEdit.setText(profile.responseFormat);
-                    langCodeEdit.setText(profile.langCode);
-                    streamBox.setChecked(profile.stream);
-                    setStatus("Loaded settings for " + profile.server + ". Tap Discover Server to refresh options.");
+                    applyProfileToControls(profile, controls);
+                    activeProfileName[0] = profile.name;
+                    updateProfileStatus(profileStatus, deleteProfileButton, profile.name);
+                    setStatus("Loaded TTS profile '" + profile.name + "'. Tap Save to apply it.");
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -2541,6 +2950,14 @@ public class MainActivity extends Activity {
         params.setMargins(dp(2), 0, dp(2), 0);
         parent.addView(col, params);
         return col;
+    }
+
+    private void addSettingsSection(LinearLayout parent, String text) {
+        TextView heading = new TextView(this);
+        heading.setText(text);
+        heading.setTextSize(18);
+        heading.setPadding(0, dp(18), 0, dp(3));
+        parent.addView(heading, matchWrap());
     }
 
     private void addLabel(LinearLayout parent, String text) {

@@ -205,7 +205,9 @@ final class KokoroAudioRepository {
             cancellation.throwIfCancelled();
             int code = connection.getResponseCode();
             if (code < 200 || code >= 300) {
-                throw new IllegalStateException("HTTP " + code + " from Kokoro: " + readError(connection));
+                throw new IllegalStateException(
+                        "HTTP " + code + " from TTS endpoint (" + config.endpointSummary() + "): "
+                                + readError(connection));
             }
 
             long expected = connection.getContentLengthLong();
@@ -237,10 +239,13 @@ final class KokoroAudioRepository {
             cancellation.throwIfCancelled();
             if (expected >= 0L && total != expected) {
                 throw new IllegalStateException(
-                        "Kokoro response ended early: received " + total + " of " + expected + " bytes.");
+                        "TTS response ended early (" + config.endpointSummary() + "): received "
+                                + total + " of " + expected + " bytes.");
             }
             if (!isUsableAudio(temporary)) {
-                throw new IllegalStateException("Kokoro returned an empty or truncated audio file.");
+                throw new IllegalStateException(
+                        "TTS endpoint returned an empty or truncated audio file ("
+                                + config.endpointSummary() + ").");
             }
             synchronized (AtomicFileStore.class) {
                 cancellation.throwIfCancelled();

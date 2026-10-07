@@ -54,10 +54,10 @@ The Settings dialog includes:
 
 - server URL, e.g. `http://10.0.2.2:8880` for the Android emulator or a LAN/VPN endpoint on a phone;
 - **Discover Server**, which queries `/v1/models` and compatible voice-list endpoints, filters Wavhost-style `installed=false` models, and offers the server's usable model/voice choices;
-- **Saved Servers**, a bounded per-endpoint history that remembers URL, model, voice, response format, stream flag, and language so switching between e.g. Kokoro `:8880` and qwentts `:11436` restores compatible settings;
+- **TTS Profiles**, named endpoint configurations that remember URL, model, voice, TTS speed, response format, stream flag, language, and endpoint-specific normalization options. Profiles can coexist even when they point at the same server, and switching e.g. Kokoro `:8880` / `mp3` and qwentts `:11436` / `wav` restores the complete compatible request contract;
 - model, still manually editable for servers that do not expose discovery metadata;
 - voice or voice mix, still manually editable for nonstandard servers;
-- **Health Check** against the configured endpoint;
+- **Reachability** check against the configured endpoint, plus **Speech Test** to synthesize with the currently edited profile and verify Android can decode the returned audio;
 - **Fetch Voices**, preferring `/v1/audio/voices` and falling back to `/v1/voices`;
 - TTS speed sent to Kokoro
 - local phone playback rate
@@ -76,7 +76,7 @@ The Settings dialog includes:
 - dark / light mode, defaulting to dark
 - build information: app version, build type, Git SHA, Git commit date, branch, describe string, and clean/dirty tree state
 
-For Kokoro, `mp3` is a good default. qwentts.cpp currently requires `wav` for Android `MediaPlayer` compatibility; saved server profiles keep those endpoint-specific choices separate.
+For Kokoro, `mp3` is a good default. qwentts.cpp currently requires `wav` for Android `MediaPlayer` compatibility; named TTS profiles keep those endpoint-specific choices separate.
 
 
 ### Multiple TTS endpoints and model discovery
@@ -87,7 +87,9 @@ The app treats the server URL as the authority. It does not hard-code a Kokoro/Q
 - Wavhost advertises its registry through `/v1/models`, including `installed` state and model speaker metadata. The app only offers installed entries, and Wavhost uses the request's `model` field to select among installed models;
 - Kokoro and other OpenAI-compatible servers can continue to use whatever subset of discovery endpoints they expose. Manual model/voice fields remain available as a fallback.
 
-The Android app intentionally does **not** install models, assign GPUs, start/stop containers, or otherwise mutate server state. Those are server/control-plane responsibilities. Multiple GPU-backed endpoints can run concurrently and be remembered independently in **Saved Servers**.
+The Android app intentionally does **not** install models, assign GPUs, start/stop containers, or otherwise mutate server state. Those are server/control-plane responsibilities. Multiple GPU-backed endpoints can run concurrently and be remembered independently in **TTS Profiles**.
+
+Settings edits are staged until **Save** is tapped. **Cancel** or the Android Back button warns before discarding changed fields; selecting a TTS profile only stages it, so accidental profile taps do not immediately change the active reader configuration. Explicit profile Save As/Delete actions are persisted immediately.
 
 ## Speech history and offline replay
 

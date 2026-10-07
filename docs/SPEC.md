@@ -124,7 +124,7 @@ Settings should include:
 - server URL;
 - health check;
 - server discovery from `/v1/models` plus compatible voice-list endpoints;
-- bounded saved server profiles that preserve endpoint-specific model/voice/format choices;
+- bounded named TTS profiles that preserve endpoint-specific server/model/voice/speed/format/stream/language/normalization choices, including multiple profiles for the same server;
 - model, with manual fallback when discovery is unavailable;
 - voice/mix, with manual fallback when discovery is unavailable;
 - Kokoro TTS speed;

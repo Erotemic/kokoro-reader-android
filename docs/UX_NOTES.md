@@ -59,4 +59,12 @@ These are intentionally not implemented yet, but the current architecture should
 - per-session delete from History;
 - favorites/pinned sessions;
 - per-word or per-sentence timestamps if the TTS server can provide them;
-- Wi-Fi/VPN reachability diagnostics in Health Check.
+- richer Wi-Fi/VPN reachability diagnostics beyond the current Reachability and Speech Test actions.
+## Settings and TTS profiles
+
+- Treat a TTS endpoint as a request contract, not just a URL. A named profile owns server URL, model, voice, server-side speed, response format, stream flag, language, and normalization behavior.
+- Keep reader-global controls such as local playback rate, chunk size, history, prefetch, progress scope, and theme outside endpoint profiles.
+- Loading a profile stages its values inside Settings. The active reader configuration changes only after Save.
+- Never silently dismiss edited settings. Cancel/back must warn when fields differ from the state that opened the dialog.
+- Explicit profile-library mutations (Save As/Delete) may persist immediately, but the UI should say so.
+- Surface endpoint/model/voice/format in synthesis or playback failures. A successful health check proves reachability, not media-format compatibility.

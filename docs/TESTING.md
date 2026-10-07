@@ -109,7 +109,7 @@ Then run:
 servers. `server_smoke_test.sh` proves the selected real backend accepts the
 Android request contract and returns playable-looking audio. Neither test proves
 that the phone can route to the server; for that final networking boundary, use
-the app's Settings -> Health Check or a connected-device test.
+the app's Settings -> Reachability / Speech Test or a connected-device test.
 
 ### Real-server audio sanity
 

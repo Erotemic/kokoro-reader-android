@@ -126,6 +126,11 @@ final class TtsConfig {
                 + "\nphone=" + phoneNormalization;
     }
 
+    String endpointSummary() {
+        return serverBase + " model=" + model + " voice=" + voice + " format=" + responseFormat
+                + " stream=" + stream;
+    }
+
     JSONObject requestPayload(String text) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
